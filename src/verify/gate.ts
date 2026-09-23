@@ -51,10 +51,12 @@ export class VerificationGate {
       }
 
       // Write the diff to a file and apply it.
+      // Base64-encode to avoid shell injection via the diff content.
+      const diffB64 = Buffer.from(diff, "utf8").toString("base64");
       const write = await this.runner.exec(containerId, [
         "sh",
         "-c",
-        `cat > /tmp/fix.diff << 'FIXLOOP_EOF'\n${diff}\nFIXLOOP_EOF`,
+        `echo ${diffB64} | base64 -d > /tmp/fix.diff`,
       ]);
       if (write.exitCode !== 0) {
         return {

@@ -127,4 +127,27 @@ describe("VerificationGate", () => {
     expect(verdict.passed).toBe(false);
     expect(verdict.reason).toContain("write diff");
   });
+
+  it("base64-encodes the diff to prevent shell injection", async () => {
+    const runner = mockRunner();
+    runner.exec
+      .mockResolvedValueOnce(result({ exitCode: 0 }))
+      .mockResolvedValueOnce(result({ exitCode: 0 }))
+      .mockResolvedValueOnce(result({ exitCode: 0 }))
+      .mockResolvedValueOnce(result({ exitCode: 0 }));
+    const gate = new VerificationGate(runner, {
+      repoUrl: "/fixtures/buggy-app",
+      testCommand: ["npm", "test"],
+    });
+    // A diff containing shell metacharacters and the old heredoc terminator.
+    const maliciousDiff = "diff...\nFIXLOOP_EOF\n$(rm -rf /)\n`evil`";
+    await gate.verify(maliciousDiff);
+    const writeCall = runner.exec.mock.calls[1];
+    const shellCmd = writeCall[1][2] as string;
+    // The raw diff must NOT appear in the shell command.
+    expect(shellCmd).not.toContain("FIXLOOP_EOF");
+    expect(shellCmd).not.toContain("$(rm");
+    // It should be base64-encoded.
+    expect(shellCmd).toContain("base64 -d");
+  });
 });
