@@ -20,6 +20,25 @@ export interface RunOptions {
   workdir?: string;
 }
 
+export interface StartOptions {
+  /** CPU limit. Default "1". */
+  cpus?: number | string;
+  /** Memory limit. Default "512m". */
+  memory?: string;
+  /** PID limit. Default 100. */
+  pidsLimit?: number;
+  /** Docker network. Default "none" (no network access). */
+  network?: string;
+  /** Environment variables to pass into the container. */
+  env?: Record<string, string>;
+  /** Working directory inside the container. */
+  workdir?: string;
+  /** Bind mounts, e.g. ["/host/path:/container/path"]. */
+  volumes?: string[];
+  /** Wall-clock limit for the start command itself. Default 60s. */
+  timeoutMs?: number;
+}
+
 export interface ExecOptions {
   timeoutMs?: number;
   workdir?: string;
@@ -92,6 +111,65 @@ export class DockerRunner {
     if (opts.workdir) args.push("--workdir", opts.workdir);
     args.push(containerId, ...command);
     return this.spawnDocker(args, timeoutMs);
+  }
+
+  /**
+   * Starts a detached container and returns its ID.
+   * Unlike run(), the container is NOT --rm; the caller must remove() it.
+   * Used for multi-step workflows (clone, then test, then fix).
+   */
+  async start(
+    image: string,
+    command: string[],
+    opts: StartOptions = {},
+  ): Promise<string> {
+    const timeoutMs = opts.timeoutMs ?? 60_000;
+    // Use a cidfile so a timeout/hang can clean up the container explicitly.
+    const workdir = mkdtempSync(join(tmpdir(), "fixloop-"));
+    const cidfile = join(workdir, "cid");
+    const args = [
+      "run",
+      "-d",
+      `--cidfile=${cidfile}`,
+      `--cpus=${opts.cpus ?? 1}`,
+      `--memory=${opts.memory ?? "512m"}`,
+      `--pids-limit=${opts.pidsLimit ?? 100}`,
+      `--network=${opts.network ?? "none"}`,
+    ];
+    for (const [k, v] of Object.entries(opts.env ?? {})) {
+      args.push("--env", `${k}=${v}`);
+    }
+    for (const v of opts.volumes ?? []) {
+      args.push("-v", v);
+    }
+    if (opts.workdir) args.push("--workdir", opts.workdir);
+    args.push(image, ...command);
+    try {
+      const result = await this.spawnDocker(args, timeoutMs, cidfile);
+      if (result.exitCode !== 0) {
+        throw new Error(
+          `Failed to start container: ${result.stderr.trim() || `exit ${result.exitCode}`}`,
+        );
+      }
+      const id = result.stdout.trim();
+      if (!id) {
+        throw new Error("Docker did not return a container ID.");
+      }
+      return id;
+    } catch (err) {
+      // If start failed/timed out, try to clean up via the cidfile.
+      try {
+        const cid = readFileSync(cidfile, "utf8").trim();
+        if (cid) {
+          await this.remove(cid);
+        }
+      } catch {
+        // No cidfile or already gone; nothing to clean.
+      }
+      throw err;
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+    }
   }
 
   /**

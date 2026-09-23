@@ -1,0 +1,1 @@
+{"description":"FixLoop fixture: a minimal app with a known bug for RED->GREEN verification","name":"buggy-app","scripts":{"test":"node --test tests/"},"type":"module","version":"1.0.0"}
