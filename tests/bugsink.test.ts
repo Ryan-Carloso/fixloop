@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { BugSinkProvider } from "../src/providers/bugsink.js";
 import { buildServer } from "../src/server.js";
+import { JobQueue, JobStore, type JobHandler } from "../src/jobs/jobs.js";
+import type { FixLoopConfig } from "../src/config/config.js";
 
 // Modeled on BugSink's real custom-webhook payload:
 // IssueSerializer fields + the convenience fields the backend adds
@@ -80,9 +82,21 @@ describe("BugSinkProvider", () => {
 
 describe("POST /webhooks/bugsink", () => {
   const secret = "test-webhook-secret";
+  const config: FixLoopConfig = {
+    repositories: {
+      "my-app": {
+        providerProject: "my-app",
+        github: { repository: "my-user/my-app", defaultBranch: "main" },
+        commands: {
+          install: "pnpm install --frozen-lockfile",
+          test: "pnpm test",
+        },
+      },
+    },
+  };
 
   it("accepts a valid signed payload and returns the normalized issue", async () => {
-    const app = buildServer({ webhookSecret: secret });
+    const app = buildServer({ webhookSecret: secret, config });
     const res = await app.inject({
       method: "POST",
       url: "/webhooks/bugsink",
@@ -95,6 +109,7 @@ describe("POST /webhooks/bugsink", () => {
       provider: "bugsink",
       issueId: "497f6eca-6276-4993-bfeb-53cbbbba6f08",
       project: "my-app",
+      queued: true,
     });
   });
 

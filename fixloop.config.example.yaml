@@ -1,0 +1,16 @@
+# Example FixLoop configuration.
+# Copy to fixloop.config.yaml (or point FIXLOOP_CONFIG at it) and adjust.
+# Secrets (webhook token, GitHub token, model keys) come from the environment,
+# never from this file.
+repositories:
+  my-app:
+    # Must match the BugSink payload's `project_name` field.
+    providerProject: my-app
+    github:
+      repository: my-user/my-app
+      defaultBranch: main
+    commands:
+      install: pnpm install --frozen-lockfile
+      test: pnpm test
+      lint: pnpm lint
+      typecheck: pnpm typecheck
