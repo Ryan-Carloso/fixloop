@@ -19,6 +19,8 @@ export interface RepairOutcome {
   greenProven: boolean;
   /** Unified diff of the fix, if any. */
   diff?: string;
+  /** Changed files with their new content, for PR creation. */
+  changedFiles?: Array<{ path: string; content: string }>;
 }
 
 /**
@@ -77,8 +79,9 @@ export class RepairWorkflow {
       });
       const greenProven = green.exitCode === 0 && !green.timedOut;
 
-      // Capture the diff for the PR.
+      // Capture the diff and changed files for the PR.
       let diff: string | undefined;
+      let changedFiles: Array<{ path: string; content: string }> | undefined;
       if (greenProven) {
         const diffResult = await this.runner.exec(
           containerId,
@@ -88,9 +91,39 @@ export class RepairWorkflow {
         if (diffResult.exitCode === 0) {
           diff = diffResult.stdout;
         }
+        // Get the list of changed files and their new content.
+        // Use --name-status to detect deletions; deleted files are skipped
+        // (not supported in MVP — the GitHub client only handles modifications).
+        const namesResult = await this.runner.exec(
+          containerId,
+          ["git", "diff", "--name-status"],
+          { workdir: "/workspace" },
+        );
+        if (namesResult.exitCode === 0) {
+          const lines = namesResult.stdout
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0);
+          changedFiles = [];
+          for (const line of lines) {
+            const [status, file] = line.split(/\s+/, 2);
+            if (!file) continue;
+            if (status === "D") {
+              // Skip deleted files (MVP limitation).
+              continue;
+            }
+            const catResult = await this.runner.exec(
+              containerId,
+              ["cat", `/workspace/${file}`],
+            );
+            if (catResult.exitCode === 0) {
+              changedFiles.push({ path: file, content: catResult.stdout });
+            }
+          }
+        }
       }
 
-      return { redProven: true, fixApplied: true, greenProven, diff };
+      return { redProven: true, fixApplied: true, greenProven, diff, changedFiles };
     } finally {
       await this.runner.remove(containerId);
     }

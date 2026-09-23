@@ -54,12 +54,16 @@ describe("RepairWorkflow", () => {
   it("proves RED, applies fix, and proves GREEN", async () => {
     const runner = mockRunner();
     const agent = mockAgent();
-    // Sequence: clone, test(RED), diagnose, applyFix, test(GREEN).
+    // Sequence: clone, test(RED), test(GREEN), git diff, diff --name-status, cat file.
     runner.exec
       .mockResolvedValueOnce(result({ exitCode: 0 })) // git clone
       .mockResolvedValueOnce(result({ exitCode: 1, stdout: "FAIL" })) // test RED
       .mockResolvedValueOnce(result({ exitCode: 0 })) // test GREEN
-      .mockResolvedValueOnce(result({ stdout: "diff...", exitCode: 0 })); // git diff
+      .mockResolvedValueOnce(result({ stdout: "diff...", exitCode: 0 })) // git diff
+      .mockResolvedValueOnce(result({ stdout: "M\tsrc/math.js\n", exitCode: 0 })) // --name-status
+      .mockResolvedValueOnce(
+        result({ stdout: "export function add(a,b){return a+b;}", exitCode: 0 }),
+      ); // cat file
     const workflow = new RepairWorkflow(runner, agent, {
       repoUrl: "/fixtures/buggy-app",
       testCommand: ["npm", "test"],
@@ -68,6 +72,8 @@ describe("RepairWorkflow", () => {
     expect(outcome.redProven).toBe(true);
     expect(outcome.greenProven).toBe(true);
     expect(outcome.fixApplied).toBe(true);
+    expect(outcome.changedFiles).toHaveLength(1);
+    expect(outcome.changedFiles![0].path).toBe("src/math.js");
     expect(agent.diagnose).toHaveBeenCalled();
     expect(agent.applyFix).toHaveBeenCalled();
     expect(runner.remove).toHaveBeenCalledWith("container-123");
