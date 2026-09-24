@@ -69,6 +69,11 @@ pnpm start
 
 ## Configuration
 
+A `fixloop.config.example.yaml` is included at the repo root — copy it to
+`fixloop.config.yaml` (or point `FIXLOOP_CONFIG` at it) and adjust the
+repositories, commands, and branches. Secrets stay in the environment,
+never in the file.
+
 Environment variables:
 
 - `BUGSINK_WEBHOOK_TOKEN`: Shared secret for BugSink webhook authentication.
