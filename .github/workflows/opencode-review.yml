@@ -14,6 +14,14 @@ name: opencode-review
 #   the head SHA), so each review round stays visible instead of overwriting
 #   the previous one.
 #
+# Why pull_request_target:
+# - GitHub does NOT pass secrets to `pull_request` workflows from forks, so
+#   the ZAI_API_KEY check would always skip on fork PRs.
+# - `pull_request_target` runs in the base repo context WITH secrets, and the
+#   checkout step below explicitly checks out the PR head.
+# - This is safe here: the workflow never executes PR code — it only reads
+#   the diff (`gh pr diff`) and posts a comment.
+#
 # Setup:
 # 1. Add the `ZAI_API_KEY` secret (usable with both z.ai API endpoints).
 #    Until the secret exists, the review steps are skipped.
@@ -22,7 +30,7 @@ name: opencode-review
 #    standard API.
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
 # Cancel a superseded review when new pushes arrive.
@@ -48,6 +56,8 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Check for z.ai API key
         id: check
