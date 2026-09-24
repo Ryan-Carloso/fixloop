@@ -23,6 +23,18 @@ const RepositorySchema = z.object({
 });
 
 const ConfigSchema = z.object({
+  /** Error provider id, e.g. "bugsink". Written by `fixloop setup`. */
+  provider: z.string().optional(),
+  /** Public base URL where FixLoop is reachable. Written by `fixloop setup`. */
+  publicUrl: z.string().optional(),
+  /** GitHub auth method. Written by `fixloop setup`. */
+  githubAuthMethod: z.enum(["token", "app"]).optional(),
+  /** AI provider id for the coding agent. Written by `fixloop setup`. */
+  aiProvider: z.string().optional(),
+  /** Model the coding agent should use. Written by `fixloop setup`. */
+  model: z.string().optional(),
+  /** Runner image validated during setup. Written by `fixloop setup`. */
+  runnerImage: z.string().optional(),
   repositories: z.record(z.string(), RepositorySchema).default({}),
 });
 
