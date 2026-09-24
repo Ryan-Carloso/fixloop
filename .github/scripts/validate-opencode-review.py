@@ -39,7 +39,7 @@ def main() -> int:
 
     # Triggers
     # NOTE: in YAML 1.1 `on:` parses as boolean True
-    triggers = doc.get(True, {}).get("pull_request", {}).get("types", [])
+    triggers = doc.get(True, {}).get("pull_request_target", {}).get("types", [])
     for event in ("opened", "synchronize", "reopened", "ready_for_review"):
         check(f"trigger includes pull_request:{event}", event in triggers)
 
