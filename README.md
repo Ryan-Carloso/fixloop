@@ -57,6 +57,28 @@ src/
 # Install dependencies
 pnpm install
 
+# Build (also wires up the `fixloop` CLI)
+pnpm build
+
+# Interactive setup wizard (recommended)
+node dist/cli/index.js setup
+# or, after `pnpm link` / global install:
+fixloop setup
+```
+
+The wizard checks your server (OS, Docker, Git), configures your error
+provider, GitHub access, and OpenCode model, validates the Docker runner
+with a disposable container, and writes `fixloop.config.yaml` + `.env`
+(non-secret config and secrets are kept separate). Then:
+
+```bash
+fixloop doctor   # diagnose the installation (read-only, never changes anything)
+fixloop status   # concise status; secrets are never printed
+fixloop test     # safely exercise the installation (no fake bugs, no PRs)
+fixloop configure # update the existing configuration
+```
+
+```bash
 # Run tests
 pnpm test
 
@@ -67,20 +89,64 @@ pnpm typecheck
 pnpm start
 ```
 
+## Provider support
+
+**Error providers** (where FixLoop receives errors from):
+
+| Provider | Status | Notes |
+|---|---|---|
+| BugSink | ✅ Supported | Webhook with shared token (`POST /webhooks/bugsink`) |
+| Sentry | 🔜 Coming soon | Not yet implemented |
+| Bugsnag | 🔜 Coming soon | Not yet implemented |
+| Sentry-compatible | 🔜 Coming soon | Not yet implemented |
+
+The setup wizard only offers providers that actually work — anything else is
+shown as "Coming soon" and cannot be selected.
+
+**AI providers** (for the OpenCode coding agent):
+
+| Provider | Status | Config |
+|---|---|---|
+| Anthropic | ✅ Supported | `ANTHROPIC_API_KEY` |
+| OpenAI | ✅ Supported | `OPENAI_API_KEY` |
+| OpenRouter | ✅ Supported | `OPENROUTER_API_KEY` |
+| Z.AI | ✅ Supported | `ZAI_API_KEY` + `ZAI_BASE_URL` (custom `opencode.json` snippet) |
+| OpenAI-compatible | ✅ Supported | `OPENAI_COMPATIBLE_API_KEY` + `OPENAI_COMPATIBLE_BASE_URL` |
+
+You pick the model id yourself during setup (e.g. `anthropic/claude-sonnet-4-5`) —
+no hardcoded model list to go stale.
+
 ## Configuration
 
-A `fixloop.config.example.yaml` is included at the repo root — copy it to
-`fixloop.config.yaml` (or point `FIXLOOP_CONFIG` at it) and adjust the
+The recommended way to configure FixLoop is the wizard:
+
+```bash
+fixloop setup
+```
+
+It writes two files in the install directory:
+
+- `fixloop.config.yaml` — non-secret configuration (provider, public URL,
+  repository, commands, AI provider/model, runner image). Safe to inspect.
+- `.env` — secrets only (`FIXLOOP_WEBHOOK_SECRET`, `GITHUB_TOKEN`, and the
+  AI provider API key). Written with owner-only permissions (`0600`).
+  Never commit this file.
+
+You can also start from the included `fixloop.config.example.yaml` — copy it
+to `fixloop.config.yaml` (or point `FIXLOOP_CONFIG` at it) and adjust the
 repositories, commands, and branches. Secrets stay in the environment,
 never in the file.
 
 Environment variables:
 
-- `BUGSINK_WEBHOOK_TOKEN`: Shared secret for BugSink webhook authentication.
+- `FIXLOOP_WEBHOOK_SECRET`: Shared secret for webhook authentication
+  (sent as the `X-FixLoop-Webhook-Token` header or `?token=`).
 - `GITHUB_TOKEN`: GitHub personal access token (for PR creation).
-- `GITHUB_OWNER`: GitHub repository owner.
-- `GITHUB_REPO`: GitHub repository name.
-- `OPENCODE_BIN`: Path to OpenCode CLI (default: `opencode`).
+- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` /
+  `ZAI_API_KEY` / `OPENAI_COMPATIBLE_API_KEY`: AI provider key for OpenCode.
+- `FIXLOOP_PORT`: API port (default `3000`).
+- `FIXLOOP_HOST`: API bind address (default `0.0.0.0`).
+- `FIXLOOP_CONFIG`: Path to the config file (default `fixloop.config.yaml`).
 
 ## API Endpoints
 
@@ -107,14 +173,21 @@ Environment variables:
 ## Testing
 
 ```bash
-pnpm test          # Run all tests (94 tests)
+pnpm test          # Run all tests (177 tests)
 pnpm typecheck     # TypeScript validation
 ```
 
 The test suite includes:
 - Unit tests for all components (mocked Docker, OpenCode, GitHub).
+- CLI wizard tests: preflight, provider selection, webhook URL construction,
+  config persistence/atomic writes, package-manager detection, GitHub
+  verification, OpenCode probe, runner validation, doctor (success + partial
+  failure), secret masking/redaction, and Ctrl+C cancellation.
 - Adversarial test: "OpenCode says FIXED but tests FAIL → NO PR".
 - End-to-end orchestration test (mocked).
+- Scripted E2E (`node e2e/wizard-e2e.mjs`): full wizard run in a disposable
+  directory, real server boot, `doctor`/`status`/`test` against it
+  (evidence in `e2e/evidence.log`; Docker/GitHub/AI are test-doubled).
 
 ## License
 
