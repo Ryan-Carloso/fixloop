@@ -97,12 +97,12 @@ function checkAuth(
 ): AuthCheck {
   const secret = deps.webhookSecret ?? process.env.FIXLOOP_WEBHOOK_SECRET ?? "";
   if (!secret) {
-    // Fail closed, but don't disclose the misconfiguration to
-    // unauthenticated callers — and don't log it here either: the
-    // secret is static per process, so a per-request warning would let
-    // unauthenticated outsiders flood the server logs. buildServer()
-    // warns once at startup instead.
-    return { ok: false, status: 500, error: "server misconfigured" };
+    // Fail closed with a response indistinguishable from a wrong token:
+    // an anonymous prober must not learn whether this deployment has a
+    // secret configured. The misconfiguration is warned once at startup
+    // in buildServer() instead — and not logged per request, so
+    // unauthenticated outsiders cannot flood the server logs.
+    return { ok: false, status: 401, error: "invalid webhook token" };
   }
   const headerToken = req.headers["x-fixloop-webhook-token"];
   const queryToken = (req.query as { token?: unknown }).token;

@@ -454,6 +454,43 @@ describe("PostgresJobStore persistence", () => {
     expect(flushed).toBe(true);
   });
 
+  it("flush() resolves false instead of hanging when a write never settles", async () => {
+    // flush() is public: a black-holed connection (pg has no default
+    // query timeout) must not trap an embedding caller forever.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const query = vi.fn(
+      async (
+        text: string,
+      ): Promise<{ rows: Record<string, unknown>[] }> => {
+        if (text.includes("INSERT INTO fixloop_jobs")) await gate;
+        return { rows: [] };
+      },
+    );
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      { query },
+    );
+    try {
+      store.create(makeJob());
+      // Wait until the write has reached the gate (dispatched but blocked).
+      await vi.waitFor(() =>
+        expect(query).toHaveBeenCalledWith(
+          expect.stringContaining("INSERT INTO fixloop_jobs"),
+          expect.anything(),
+        ),
+      );
+      await expect(store.flush(20)).resolves.toBe(false);
+      release();
+      await expect(store.flush(1000)).resolves.toBe(true);
+    } finally {
+      release();
+      await store.close();
+    }
+  });
+
   it("close() flushes pending writes and ends the pool", async () => {
     const { query } = mockDb();
     const end = vi.fn(async () => {});

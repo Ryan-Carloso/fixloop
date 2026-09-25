@@ -229,7 +229,10 @@ describe("POST /webhooks/bugsink", () => {
       url: "/webhooks/bugsink",
       payload: validPayload,
     });
-    expect(res.statusCode).toBe(500);
+    // Indistinguishable from a wrong token: an anonymous prober must not
+    // learn whether the deployment has a secret configured.
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "invalid webhook token" });
   });
   describe("webhook dedup while the queue is stopped", () => {
     it("answers 503 (not 202 deduped) when the sender retries during shutdown", async () => {

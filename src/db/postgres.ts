@@ -558,10 +558,20 @@ export class PostgresJobStore extends JobStore {
    * could end the pool with writes still pending. close() races this
    * against SHUTDOWN_FLUSH_TIMEOUT_MS, so the loop cannot hang shutdown.
    */
-  async flush(): Promise<void> {
-    while (this.persistChains.size > 0) {
-      await Promise.allSettled([...this.persistChains.values()]);
-    }
+  /**
+   * Waits for pending write-behind chains to drain. Bounded: a write stuck
+   * on a black-holed connection (pg has no default query timeout) must not
+   * trap the caller forever. Returns true when fully drained, false when
+   * the timeout won and writes are still pending.
+   */
+  async flush(timeoutMs: number = SHUTDOWN_FLUSH_TIMEOUT_MS): Promise<boolean> {
+    const drained = (async (): Promise<true> => {
+      while (this.persistChains.size > 0) {
+        await Promise.allSettled([...this.persistChains.values()]);
+      }
+      return true;
+    })();
+    return Promise.race([drained, sleep(timeoutMs).then(() => false)]);
   }
 
   /**
@@ -577,10 +587,7 @@ export class PostgresJobStore extends JobStore {
    * pool, and silent data loss is worse than a noisy log.
    */
   async close(timeoutMs = SHUTDOWN_FLUSH_TIMEOUT_MS): Promise<void> {
-    const flushed = await Promise.race([
-      this.flush().then(() => true),
-      sleep(timeoutMs).then(() => false),
-    ]);
+    const flushed = await this.flush(timeoutMs);
     if (!flushed) {
       console.warn(
         `Postgres job store: shutdown flush timed out after ${timeoutMs}ms ` +

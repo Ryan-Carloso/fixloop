@@ -177,8 +177,10 @@ pre-shared webhook token: send it as the `X-FixLoop-Webhook-Token` header
 (`401 {"error":"invalid webhook token"}` without it). The token is
 deliberately not accepted as `?token=` on these routes — the server logs
 the full request URL. When `FIXLOOP_WEBHOOK_SECRET` is unset the endpoints
-(and the webhook ingest) fail closed with
-`500 {"error":"server misconfigured"}`.
+(and the webhook ingest) fail closed with the same
+`401 {"error":"invalid webhook token"}` a wrong token gets, so an
+anonymous prober cannot tell an unconfigured deployment from a configured
+one; the misconfiguration is logged server-side once at startup.
 
 ## MVP Limitations
 

@@ -157,17 +157,21 @@ describe("webhook -> queue integration", () => {
     expect(res.json()).toEqual({ error: "invalid webhook token" });
   });
 
-  it("returns 500 on the GET routes when no webhook secret is configured", async () => {
+  it("returns an indistinguishable 401 on the GET routes when no webhook secret is configured", async () => {
+    // An anonymous prober must not be able to tell an unconfigured
+    // deployment (no secret to steal) from a configured one: both answer
+    // exactly like a wrong token. The misconfiguration is logged
+    // server-side once at startup instead.
     const previous = process.env.FIXLOOP_WEBHOOK_SECRET;
     delete process.env.FIXLOOP_WEBHOOK_SECRET;
     try {
       const app = buildServer({ config });
       const list = await app.inject({ method: "GET", url: "/jobs" });
-      expect(list.statusCode).toBe(500);
-      expect(list.json()).toEqual({ error: "server misconfigured" });
+      expect(list.statusCode).toBe(401);
+      expect(list.json()).toEqual({ error: "invalid webhook token" });
       const one = await app.inject({ method: "GET", url: "/jobs/abc" });
-      expect(one.statusCode).toBe(500);
-      expect(one.json()).toEqual({ error: "server misconfigured" });
+      expect(one.statusCode).toBe(401);
+      expect(one.json()).toEqual({ error: "invalid webhook token" });
     } finally {
       if (previous === undefined) {
         delete process.env.FIXLOOP_WEBHOOK_SECRET;
@@ -184,9 +188,9 @@ describe("webhook -> queue integration", () => {
     try {
       const app = buildServer({ config });
       const first = await app.inject({ method: "GET", url: "/jobs" });
-      expect(first.statusCode).toBe(500);
+      expect(first.statusCode).toBe(401);
       const second = await app.inject({ method: "GET", url: "/jobs/abc" });
-      expect(second.statusCode).toBe(500);
+      expect(second.statusCode).toBe(401);
       // One startup warning, not one per rejected request: the secret is
       // static per process, so per-request warnings would let
       // unauthenticated outsiders flood the logs. (The Discord "not set"
