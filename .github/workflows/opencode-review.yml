@@ -67,8 +67,10 @@ jobs:
 
       - name: Check for z.ai API key
         id: check
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
         run: |
-          if [ -z "${{ secrets.ZAI_API_KEY }}" ]; then
+          if [ -z "${ZAI_API_KEY}" ]; then
             echo "has_key=false" >> "$GITHUB_OUTPUT"
             echo "ZAI_API_KEY secret is not set — skipping OpenCode review."
           else
