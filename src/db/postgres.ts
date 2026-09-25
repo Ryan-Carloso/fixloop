@@ -61,10 +61,23 @@ export function makePool(databaseUrl: string): pg.Pool {
   return pool;
 }
 
+/**
+ * Upper bound for rows loaded by hydrate(). History grows without
+ * bound, so boot must not materialize the whole table into the
+ * in-memory Map. Newest-first: the rows most likely to be queried or
+ * recovered. (Old transient rows beyond the window miss crash
+ * recovery, but dedup is in-memory, so nothing deadlocks — they are
+ * simply invisible. Proper retention/pruning is a follow-up; see the
+ * README's MVP limitations.)
+ */
+export const HYDRATE_ROW_LIMIT = 1000;
+
 const SELECT_ALL = `
   SELECT id, dedup_key, provider, repository, issue_id, status,
          error_context, note, pr_url, created_at, updated_at
   FROM fixloop_jobs
+  ORDER BY created_at DESC
+  LIMIT ${HYDRATE_ROW_LIMIT}
 `;
 
 const UPSERT_JOB = `
@@ -96,6 +109,10 @@ const CRASHED_STATUSES: ReadonlySet<JobStatus> = new Set([
 
 /** Upper bound for the write-behind flush during shutdown. */
 const SHUTDOWN_FLUSH_TIMEOUT_MS = 5_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Note recorded when a restart orphans a mid-repair job. */
 const RESTART_NOTE = "interrupted by server restart";
@@ -249,8 +266,12 @@ export class PostgresJobStore extends JobStore {
 
   private async hydrate(notifier?: JobNotifier): Promise<void> {
     const { rows } = await this.db.query(SELECT_ALL);
+    // Belt and braces: the SQL above already orders and limits, but a
+    // DbClient seam (or a future edit of the query) might not — never
+    // let an unbounded table fill the in-memory Map.
+    const capped = rows.slice(0, HYDRATE_ROW_LIMIT);
     let skipped = 0;
-    for (const row of rows) {
+    for (const row of capped) {
       if (!isJobStatus(row.status)) {
         // Corrupt/hand-edited row: never let an invalid status into the
         // store, where it would silently break dedup and ?status= filters.
@@ -381,17 +402,20 @@ export class PostgresJobStore extends JobStore {
 
   /**
    * Flushes pending writes, then closes the underlying database pool.
-   * The flush is raced against a timeout so a black-holed connection can
-   * never hang shutdown forever. Never throws — safe to call on the way out.
-   * A timed-out flush is logged: transitions still in flight at that point
-   * never reach the pool, and silent data loss is worse than a noisy log.
+   * Both phases are raced against the timeout: the flush so a
+   * black-holed connection can never hang shutdown forever, and the
+   * pool teardown because pg.Pool.end() waits for checked-out clients —
+   * a query stuck on a dead connection is never released, so an
+   * unbounded end() would trap the process on the first SIGTERM.
+   * Worst case the whole close takes 2x the timeout. Never throws —
+   * safe to call on the way out. A timed-out flush or teardown is
+   * logged: transitions still in flight at that point never reach the
+   * pool, and silent data loss is worse than a noisy log.
    */
   async close(timeoutMs = SHUTDOWN_FLUSH_TIMEOUT_MS): Promise<void> {
     const flushed = await Promise.race([
       this.flush().then(() => true),
-      new Promise<boolean>((resolve) =>
-        setTimeout(() => resolve(false), timeoutMs),
-      ),
+      sleep(timeoutMs).then(() => false),
     ]);
     if (!flushed) {
       console.warn(
@@ -399,6 +423,24 @@ export class PostgresJobStore extends JobStore {
           `with ${this.persistChains.size} write(s) still pending; they were dropped.`,
       );
     }
-    await this.db.end?.().catch(() => {});
+    const endPromise = (async (): Promise<true> => {
+      try {
+        await this.db.end?.();
+      } catch {
+        // Non-fatal on the way out: the flush above is the durability
+        // boundary, and close() must never throw.
+      }
+      return true;
+    })();
+    const closed = await Promise.race([
+      endPromise,
+      sleep(timeoutMs).then(() => false),
+    ]);
+    if (!closed) {
+      console.warn(
+        `Postgres job store: pool teardown timed out after ${timeoutMs}ms; ` +
+          `in-flight queries were abandoned.`,
+      );
+    }
   }
 }

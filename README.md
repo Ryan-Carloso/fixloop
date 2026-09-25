@@ -180,6 +180,7 @@ the full request URL. When `FIXLOOP_WEBHOOK_SECRET` is unset the endpoints
 - **GitHub**: File deletions not supported (MVP limitation). The PR uses the Git Data API (blobs → tree → commit → ref).
 - **BugSink**: Uses a shared webhook token (BugSink doesn't provide HMAC signing for issue webhooks).
 - **Scale**: Single VPS, in-process queue, concurrency 1. No Redis, no Kubernetes.
+- **History retention**: With `DATABASE_URL` set, boot hydrates at most the newest 1000 jobs (`HYDRATE_ROW_LIMIT` in `src/db/postgres.ts`); older rows stay in Postgres but are invisible to the API until pruned manually. No automatic retention/pruning yet — follow-up work.
 
 ## Security
 

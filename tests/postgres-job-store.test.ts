@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   PostgresJobStore,
+  HYDRATE_ROW_LIMIT,
   loadSchemaSql,
   makePool,
   rowToJob,
@@ -766,6 +767,27 @@ describe("PostgresJobStore shutdown observability", () => {
     }
   });
 
+  it("warns and does not hang when pool teardown stalls", async () => {
+    const { client } = mockDb();
+    const hangingEnd = {
+      ...client,
+      end: () => new Promise<void>(() => {}), // end() never resolves
+    };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const store = await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        hangingEnd,
+      );
+      await store.close(20);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("pool teardown timed out"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("logs a summary of skipped corrupt rows during hydration", async () => {
     const { client, rowsQueue } = mockDb();
     rowsQueue.push([
@@ -842,5 +864,22 @@ describe("PostgresJobStore restart notifications", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("PostgresJobStore hydration cap", () => {
+  it("never hydrates more than HYDRATE_ROW_LIMIT rows", async () => {
+    const { client, rowsQueue } = mockDb();
+    // QUEUED rows also exercise crash recovery on the capped set.
+    rowsQueue.push(
+      Array.from({ length: HYDRATE_ROW_LIMIT + 5 }, () =>
+        jobRow(makeJob({ status: "QUEUED" })),
+      ),
+    );
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    expect(store.list()).toHaveLength(HYDRATE_ROW_LIMIT);
   });
 });
