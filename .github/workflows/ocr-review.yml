@@ -29,6 +29,8 @@ concurrency:
 
 jobs:
   ocr-review:
+    # Drafts get no review; the ready_for_review trigger re-runs when marked ready.
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -55,5 +57,7 @@ jobs:
           # Pin the review engine: the action itself is SHA-pinned, but without
           # this the npm package would float on @latest in a privileged
           # pull_request_target context. Bump deliberately after checking
-          # the changelog. (Latest known-good: 1.12.9, checked 2026-09-25.)
+          # the changelog. (Latest known-good: 1.12.9 — verified against the
+          # action's action.yml at pinned SHA 486022d on 2026-09-25; the input
+          # drives the npm install of @alibaba-group/open-code-review.)
           ocr_version: "1.12.9"
