@@ -119,6 +119,11 @@ function jobParams(job: Job): unknown[] {
  *
  * Write-behind failures are logged loudly but never break the repair
  * pipeline — the in-memory behavior is always preserved.
+ *
+ * Redaction boundary: free-text failure notes are sanitized with
+ * sanitizeForPr at capture (JobQueue.runOne), so every sink stays
+ * redacted. errorContext is retained verbatim as structured diagnostics —
+ * same trust boundary as the server logs, which already carry it.
  */
 export class PostgresJobStore extends JobStore {
   /**

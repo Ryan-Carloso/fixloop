@@ -39,9 +39,13 @@ interface EmbedField {
 
 function jobFields(job: DiscordJobRef): EmbedField[] {
   return [
-    { name: "Job", value: job.id, inline: true },
-    { name: "Repository", value: job.repository, inline: true },
-    { name: "Issue", value: `${job.provider}:${job.issueId}`, inline: true },
+    { name: "Job", value: truncateField(job.id), inline: true },
+    { name: "Repository", value: truncateField(job.repository), inline: true },
+    {
+      name: "Issue",
+      value: truncateField(`${job.provider}:${job.issueId}`),
+      inline: true,
+    },
   ];
 }
 
@@ -50,10 +54,20 @@ function jobFields(job: DiscordJobRef): EmbedField[] {
 // otherwise yield HTTP 400 and silently drop the notification.
 const MAX_DESCRIPTION_LENGTH = 4096;
 
+// Discord caps individual field values at 1024 characters; issueId comes
+// from the external webhook payload and is unbounded.
+const MAX_FIELD_LENGTH = 1024;
+
 /** Truncate over-long text so the embed stays within Discord's limits. */
 function truncate(text: string): string {
   if (text.length <= MAX_DESCRIPTION_LENGTH) return text;
   return `${text.slice(0, MAX_DESCRIPTION_LENGTH - 1)}…`;
+}
+
+/** Truncate over-long embed field values (1024-char field cap). */
+function truncateField(text: string): string {
+  if (text.length <= MAX_FIELD_LENGTH) return text;
+  return `${text.slice(0, MAX_FIELD_LENGTH - 1)}…`;
 }
 
 function buildEmbed(event: DiscordEvent): Record<string, unknown> {

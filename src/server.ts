@@ -24,7 +24,12 @@ export interface ServerDeps {
   store?: JobStore;
   queue?: JobQueue;
   handleJob?: JobHandler;
-  /** Discord notifier. Defaults to DiscordNotifier.fromEnv() (no-op when DISCORD_WEBHOOK_URL is unset). */
+  /**
+   * Discord notifier. Defaults to DiscordNotifier.fromEnv() (no-op when
+   * DISCORD_WEBHOOK_URL is unset). Only used when the default queue is
+   * built — ignored when `queue` is injected (wire the notifier into your
+   * own JobQueue instead).
+   */
   notifier?: JobNotifier;
 }
 

@@ -227,4 +227,22 @@ describe("runDoctor", () => {
     expect(check.ok).toBe(false);
     expect(check.hint).toMatch(/DISCORD_WEBHOOK_URL/);
   });
+
+  it("reports the Discord webhook unreachable when the request throws", async () => {
+    const discordUrl = "https://discord.com/api/webhooks/EXAMPLE";
+    const dir = mkdtempSync(join(tmpdir(), "fixloop-doctor-"));
+    writeInstall(dir, YAML, `${ENV}DISCORD_WEBHOOK_URL=${discordUrl}\n`);
+    const { lines, deps: d } = deps(dir, {
+      http: (async (url: string) => {
+        if (String(url).includes("discord.com"))
+          throw new Error("getaddrinfo ENOTFOUND discord.com");
+        return { ok: true, status: 200 };
+      }) as unknown as typeof fetch,
+    });
+    const result = await runDoctor(d);
+    const check = result.checks.find((c) => c.name === "Discord webhook")!;
+    expect(check.ok).toBe(false);
+    expect(check.hint).toMatch(/DISCORD_WEBHOOK_URL/);
+    assertNoSecrets(lines.join("\n"), [discordUrl]);
+  });
 });

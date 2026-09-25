@@ -134,6 +134,7 @@ describe("webhook -> queue integration", () => {
 describe("default Discord notifier wiring", () => {
   it("notifies through DiscordNotifier.fromEnv() in the default queue", async () => {
     const url = "https://discord.com/api/webhooks/123/serverwiring";
+    const previousWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
     process.env.DISCORD_WEBHOOK_URL = url;
     const fetchSpy = vi.fn(async () => ({ ok: true, status: 204 }));
     vi.stubGlobal("fetch", fetchSpy);
@@ -145,7 +146,10 @@ describe("default Discord notifier wiring", () => {
       expect(res.statusCode).toBe(202);
       // The stub handler marks the job NEEDS_HUMAN_REVIEW, which must
       // produce a needs_review Discord notification via the default wiring.
-      await new Promise((r) => setTimeout(r, 100));
+      // Poll instead of a fixed sleep: queue processing time varies.
+      for (let i = 0; i < 100 && fetchSpy.mock.calls.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
       expect(fetchSpy).toHaveBeenCalled();
       for (const call of fetchSpy.mock.calls) {
         expect(call[0]).toBe(url);
@@ -159,7 +163,11 @@ describe("default Discord notifier wiring", () => {
         ),
       ).toBe(true);
     } finally {
-      delete process.env.DISCORD_WEBHOOK_URL;
+      if (previousWebhookUrl === undefined) {
+        delete process.env.DISCORD_WEBHOOK_URL;
+      } else {
+        process.env.DISCORD_WEBHOOK_URL = previousWebhookUrl;
+      }
       vi.unstubAllGlobals();
     }
   });

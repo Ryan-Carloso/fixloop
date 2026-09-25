@@ -6,7 +6,9 @@
 --   psql "$DATABASE_URL" -f src/db/schema.sql
 
 CREATE TABLE IF NOT EXISTS fixloop_jobs (
-  id            UUID PRIMARY KEY,
+  -- TEXT, not UUID: Job ids are app-generated strings (newJobId()), and the
+  -- store must accept any string id without failing the write-behind.
+  id            TEXT PRIMARY KEY,
   dedup_key     TEXT NOT NULL,
   provider      TEXT NOT NULL,
   repository    TEXT NOT NULL,

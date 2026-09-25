@@ -238,6 +238,20 @@ describe("DiscordNotifier.notify", () => {
     const embed = lastPayload().embeds[0];
     expect(embed.description.length).toBeLessThanOrEqual(4096);
   });
+
+  it("clamps embed field values to Discord's 1024-char field limit", async () => {
+    await enabledNotifier().notify({
+      kind: "repair_started",
+      job: { ...jobRef(), issueId: "i".repeat(5000) },
+    });
+    const embed = lastPayload().embeds[0];
+    for (const field of embed.fields) {
+      expect(field.value.length).toBeLessThanOrEqual(1024);
+    }
+    expect(
+      embed.fields.find((f: { name: string }) => f.name === "Issue").value,
+    ).toContain("bugsink:");
+  });
 });
 
 describe("JobQueue Discord wiring", () => {

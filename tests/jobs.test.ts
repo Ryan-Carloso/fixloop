@@ -199,6 +199,21 @@ describe("JobQueue", () => {
     expect(store.get("job-2")!.status).toBe("RUNNING");
   });
 
+  it("sanitizes secrets out of the FAILED note at capture", async () => {
+    const store = new JobStore();
+    const handler: JobHandler = async () => {
+      throw new Error("deploy failed: api_key=supersecret123");
+    };
+    const queue = new JobQueue(store, handler);
+    queue.enqueue(makeJob("9"));
+    await tick(50);
+    expect(store.get("job-9")!.status).toBe("FAILED");
+    expect(store.get("job-9")!.note).toBe(
+      "deploy failed: api_key=[REDACTED]",
+    );
+    expect(store.get("job-9")!.note).not.toContain("supersecret123");
+  });
+
   it("different issues do not deduplicate each other", () => {
     const store = new JobStore();
     const queue = new JobQueue(store, async () => {});

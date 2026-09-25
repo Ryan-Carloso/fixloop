@@ -6,6 +6,27 @@ import {
   rowToJob,
   type DbClient,
 } from "../src/db/postgres.js";
+
+// Lets one test simulate a missing dist/db/schema.sql (packaging bug)
+// without touching the real filesystem.
+const schemaReadControl = vi.hoisted(() => ({ fail: false }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  const realRead = actual.readFileSync as (
+    p: string | URL,
+    o?: unknown,
+  ) => string;
+  return {
+    ...actual,
+    readFileSync: ((p: string | URL, o?: unknown) => {
+      if (schemaReadControl.fail) {
+        throw new Error("ENOENT: no such file or directory, open 'schema.sql'");
+      }
+      return realRead(p, o);
+    }) as typeof actual.readFileSync,
+  };
+});
 import { buildServer } from "../src/server.js";
 import {
   dedupKey,
@@ -74,6 +95,7 @@ function jobRow(job: Job): Record<string, unknown> {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  schemaReadControl.fail = false;
 });
 
 describe("loadSchemaSql", () => {
@@ -115,6 +137,22 @@ describe("loadSchemaSql", () => {
       client,
     );
     expect(store).toBeInstanceOf(PostgresJobStore);
+  });
+
+  it("throws a clear error when the schema file is missing", async () => {
+    const { client } = mockDb();
+    schemaReadControl.fail = true;
+    try {
+      await expect(
+        PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
+      ).rejects.toThrow(/could not load the Postgres schema file/);
+    } finally {
+      schemaReadControl.fail = false;
+    }
+  });
+
+  it("declares id as TEXT so any app-generated string id persists", () => {
+    expect(loadSchemaSql()).toContain("id            TEXT PRIMARY KEY");
   });
 });
 

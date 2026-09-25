@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { sanitizeForPr } from "../fixloop.js";
 import type { ErrorContext } from "../providers/error-provider.js";
 import type { DiscordEvent, JobNotifier } from "../notify/discord.js";
 
@@ -162,8 +163,10 @@ export class JobQueue {
     try {
       await this.handler(job, update);
     } catch (err) {
+      // err.message can echo secrets (command output, env dumps). Sanitize
+      // at capture so every sink (DB, API, Discord) stays redacted.
       update("FAILED", {
-        note: err instanceof Error ? err.message : String(err),
+        note: sanitizeForPr(err instanceof Error ? err.message : String(err)),
       });
     }
   }
