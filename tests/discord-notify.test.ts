@@ -130,6 +130,26 @@ describe("DiscordNotifier.notify", () => {
     expect(fields["Issue"]).toBe("bugsink:issue-1");
   });
 
+  it("escapes markdown in externally-controlled issueIds", async () => {
+    const hostile = {
+      ...jobRef(),
+      issueId: "[click me](https://evil.example/phish)",
+    };
+    await enabledNotifier().notify({ kind: "repair_started", job: hostile });
+    const embed = lastPayload().embeds[0];
+    const fields = Object.fromEntries(
+      embed.fields.map((f: { name: string; value: string }) => [f.name, f.value]),
+    );
+    // No raw masked link may survive in a trusted FixLoop notification.
+    expect(fields["Issue"]).toBe(
+      "bugsink:\\[click me\\]\\(https://evil.example/phish\\)",
+    );
+    expect(embed.description).toContain(
+      "\\[click me\\]\\(https://evil.example/phish\\)",
+    );
+    expect(JSON.stringify(embed)).not.toContain("[click me](");
+  });
+
   it("posts a pr_created embed containing the PR URL", async () => {
     const prUrl = "https://github.com/o/r/pull/42";
     await enabledNotifier().notify({

@@ -43,7 +43,12 @@ function jobFields(job: DiscordJobRef): EmbedField[] {
     { name: "Repository", value: truncateField(job.repository), inline: true },
     {
       name: "Issue",
-      value: truncateField(`${job.provider}:${job.issueId}`),
+      // issueId comes from the external webhook payload: escape it so a
+      // hostile value cannot render a masked link inside a trusted
+      // FixLoop notification (see escapeDiscordMarkdown).
+      value: truncateField(
+        `${job.provider}:${escapeDiscordMarkdown(job.issueId)}`,
+      ),
       inline: true,
     },
   ];
@@ -69,6 +74,18 @@ function truncateField(text: string): string {
   return truncateTo(text, MAX_FIELD_LENGTH);
 }
 
+/**
+ * Backslash-escape Discord markdown metacharacters in externally-
+ * controlled strings. Embeds render masked links ([text](url)), so an
+ * unescaped issueId from a hostile or spoofed webhook payload could
+ * plant a phishing link inside a trusted FixLoop notification.
+ * (BugSink generates issueIds server-side, so this is defense in
+ * depth.)
+ */
+function escapeDiscordMarkdown(text: string): string {
+  return text.replace(/[\\[\]()]/g, (ch) => `\\${ch}`);
+}
+
 // Discord allows 6000 characters per embed in total (title, description
 // and fields combined).
 const MAX_TOTAL_LENGTH = 6000;
@@ -81,7 +98,7 @@ function buildEmbed(event: DiscordEvent): Record<string, unknown> {
   switch (event.kind) {
     case "repair_started":
       title = "🔧 FixLoop: repair started";
-      rawDescription = `Repair pipeline started for **${event.job.provider}** issue **${event.job.issueId}**.`;
+      rawDescription = `Repair pipeline started for **${event.job.provider}** issue **${escapeDiscordMarkdown(event.job.issueId)}**.`;
       color = COLORS.started;
       break;
     case "pr_created":
