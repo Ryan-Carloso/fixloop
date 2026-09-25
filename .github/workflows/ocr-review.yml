@@ -12,7 +12,7 @@ name: OCR Review (Alibaba OpenCodeReview)
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -47,3 +47,8 @@ jobs:
           llm_auth_token: ${{ secrets.ZAI_API_KEY }}
           llm_model: glm-5.3-flash
           llm_use_anthropic: "false"
+          # Pin the review engine: the action itself is SHA-pinned, but without
+          # this the npm package would float on @latest in a privileged
+          # pull_request_target context. Bump deliberately after checking
+          # the changelog. (Latest known-good: 1.12.9, checked 2026-09-25.)
+          ocr_version: "1.12.9"
