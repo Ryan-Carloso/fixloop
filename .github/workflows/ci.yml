@@ -61,7 +61,10 @@ jobs:
           curl -sSL -o /tmp/actionlint.tar.gz \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
           echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/actionlint.tar.gz -C /tmp
+          # The tarball has a top-level actionlint binary (no subdirectory):
+          # extract into a dedicated dir so the run step's path resolves.
+          mkdir -p /tmp/actionlint
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp/actionlint
 
       - name: Run actionlint
         run: /tmp/actionlint/actionlint -color
