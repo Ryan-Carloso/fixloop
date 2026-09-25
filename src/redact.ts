@@ -29,12 +29,19 @@ export function sanitizeForPr(text: string): string {
         /\b([\w.-]*(?:api[_-]?key|token|secret|password|passwd|pwd)[\w.-]*)\s*(['"]?)\s*([:=])\s*(['"]?)([^\s,;}\]'"]+)(['"]?)/gi,
         "$1$2$3$4[REDACTED]$6",
       )
-      // Bearer tokens.
-      .replace(/\bBearer\s+[a-zA-Z0-9._-]{10,}\b/g, "Bearer [REDACTED]")
+      // Bearer tokens: the character class includes "." and "-" (both
+      // non-word characters), so a trailing \b would fail to match when
+      // the token ends with one of them and the whole rule would be
+      // skipped, leaking the token. No trailing boundary is needed: the
+      // class already excludes whitespace and quotes.
+      .replace(/\bBearer\s+[a-zA-Z0-9._-]{10,}/g, "Bearer [REDACTED]")
       // Credentials embedded in URLs (postgres://user:pass@host/db).
       // The username may be empty (postgres://:pass@host, redis://:pass@host).
+      // The whole userinfo is redacted, not just the password: usernames
+      // can themselves be sensitive (access-key IDs passed as the user,
+      // database owners, personal identifiers).
       .replace(
-        /([a-z][a-z0-9+.-]*:\/\/[^/\s:@]*:)[^@\s/]+@/gi,
+        /([a-z][a-z0-9+.-]*:\/\/)[^/:\s@]*:[^@\s/]+@/gi,
         "$1[REDACTED]@",
       )
       // Webhook URLs (https://discord.com/api/webhooks/<id>/<token>): the

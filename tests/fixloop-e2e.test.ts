@@ -78,6 +78,16 @@ describe("sanitizeForPr", () => {
     expect(sanitizeForPr(input)).toContain("Bearer [REDACTED]");
   });
 
+  it("redacts Bearer tokens ending in a non-word character", () => {
+    // Regression: the trailing \b after [a-zA-Z0-9._-]{10,} failed when
+    // the token ended with "." or "-" (non-word chars), so the whole rule
+    // was skipped and the raw token leaked.
+    const token = "abcdefghi" + "."; // 9 word chars + a trailing dot
+    const input = `Auth failed: Bearer ${token}`;
+    expect(sanitizeForPr(input)).not.toContain("abcdefghi");
+    expect(sanitizeForPr(input)).toContain("Bearer [REDACTED]");
+  });
+
   it("redacts password in key=value", () => {
     const input = "Login failed: password=supersecret123";
     expect(sanitizeForPr(input)).not.toContain("supersecret123");
@@ -88,14 +98,24 @@ describe("sanitizeForPr", () => {
       "connect ECONNREFUSED postgres://admin:hunter2@db:5432/fixloop";
     const redacted = sanitizeForPr(input);
     expect(redacted).not.toContain("hunter2");
-    expect(redacted).toContain("postgres://admin:[REDACTED]@db:5432/fixloop");
+    expect(redacted).toContain("postgres://[REDACTED]@db:5432/fixloop");
   });
 
   it("redacts credentials with an empty username", () => {
     const input = "dial error redis://:hunter2@cache:6379/0";
     const redacted = sanitizeForPr(input);
     expect(redacted).not.toContain("hunter2");
-    expect(redacted).toContain("redis://:[REDACTED]@cache:6379/0");
+    expect(redacted).toContain("redis://[REDACTED]@cache:6379/0");
+  });
+
+  it("redacts access-key-style usernames in URLs", () => {
+    // Usernames can themselves be sensitive: access-key IDs passed as the
+    // user, database owners, personal identifiers.
+    const user = "AKIA" + "IOSFODNN7EXAMPLE";
+    const input = `auth failed for https://${user}:wJalrXUtnFEMI@api.example.com`;
+    const redacted = sanitizeForPr(input);
+    expect(redacted).not.toContain(user);
+    expect(redacted).toContain("https://[REDACTED]@api.example.com");
   });
 
   it("redacts JSON-quoted secrets", () => {
