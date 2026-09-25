@@ -998,6 +998,27 @@ describe("PostgresJobStore single-instance advisory lock", () => {
     );
   });
 
+  it("takes the advisory lock before applying the schema and drift check", async () => {
+    // Regression: schema/DDL ran before the single-instance lock, so two
+    // processes booting concurrently against the same DATABASE_URL raced
+    // on CREATE TABLE IF NOT EXISTS (a known Postgres DDL race) and both
+    // ran the drift check before either was excluded. The lock must come
+    // first to serialize boot.
+    pgControl.query.mockClear();
+    pgControl.lockQuery.mockClear();
+    await PostgresJobStore.connect("postgres://localhost:5432/fixloop");
+    const lockIdx = pgControl.lockQuery.mock.calls.findIndex(([text]) =>
+      String(text).includes("pg_try_advisory_lock"),
+    );
+    const schemaIdx = pgControl.query.mock.calls.findIndex(([text]) =>
+      String(text).includes("CREATE TABLE"),
+    );
+    expect(lockIdx).toBeGreaterThanOrEqual(0);
+    expect(schemaIdx).toBeGreaterThanOrEqual(0);
+    const lockOrder = pgControl.lockQuery.mock.invocationCallOrder[lockIdx];
+    const schemaOrder = pgControl.query.mock.invocationCallOrder[schemaIdx];
+    expect(lockOrder).toBeLessThan(schemaOrder);
+  });
   it("refuses to start when the advisory lock is held", async () => {
     pgControl.lockQuery.mockResolvedValueOnce({ rows: [{ acquired: false }] });
     await expect(
@@ -1034,6 +1055,33 @@ describe("PostgresJobStore single-instance advisory lock", () => {
 });
 
 describe("error-context hydration fidelity", () => {
+  it("rejects rows missing a required error-context field", async () => {
+    // Hydration feeds blind JSONB rows into the typed pipeline: a row
+    // missing a required field (here: exception.message) must be
+    // skipped, not hydrated as a malformed ErrorContext.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { client, rowsQueue } = mockDb();
+      const job = makeJob({ status: "QUEUED" });
+      const row = jobRow(job);
+      row.error_context = {
+        provider: "bugsink",
+        issueId: "no-message",
+        exception: { type: "Boom" }, // message missing
+      };
+      rowsQueue.push([row]);
+      const store = await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        client,
+      );
+      expect(store.get(job.id)).toBeUndefined();
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).toContain("invalid error_context");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("preserves unknown nested exception fields across the hydration round-trip", async () => {
     // Regression: errorContextSchema only had a top-level .passthrough(),
     // so a future exception.cause (or any provider-specific nested field)

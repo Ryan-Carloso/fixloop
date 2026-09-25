@@ -9,6 +9,12 @@ CREATE TABLE IF NOT EXISTS fixloop_jobs (
   -- TEXT, not UUID: Job ids are app-generated strings (newJobId()), and the
   -- store must accept any string id without failing the write-behind.
   id            TEXT PRIMARY KEY,
+  -- No UNIQUE constraint on dedup_key by design: duplicate-active
+  -- suppression is enforced in the in-memory store
+  -- (findActiveByDedupKey), which is the single writer while the
+  -- advisory lock guarantees one instance. A schema-level constraint
+  -- would also change write-behind conflict behavior — revisit if a
+  -- second writer ever bypasses the store.
   dedup_key     TEXT NOT NULL,
   provider      TEXT NOT NULL,
   repository    TEXT NOT NULL,

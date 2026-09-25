@@ -321,13 +321,15 @@ export class PostgresJobStore extends JobStore {
     }
     const store = new PostgresJobStore(client, releaseLock);
     try {
-      await client.query(loadSchemaSql());
-      await store.assertNoSchemaDrift(client);
       if (pool) {
         // Single-instance guard: crash recovery rewrites every transient
         // row on boot, so two processes sharing one DATABASE_URL corrupt
         // each other — the second boot would mark the first instance's
-        // live jobs FAILED and free their dedup keys. Take a
+        // live jobs FAILED and free their dedup keys. The lock is taken
+        // BEFORE the schema/DDL below: concurrent CREATE TABLE IF NOT
+        // EXISTS can intermittently fail with a unique-violation on the
+        // pg catalogs (a known Postgres DDL race), and the drift check
+        // must not run on two boots at once either. Take a
         // session-level advisory lock on a dedicated client and hold it
         // until close(); Postgres releases it automatically if this
         // process dies, so a crashed instance never blocks a restart.
@@ -344,6 +346,8 @@ export class PostgresJobStore extends JobStore {
           );
         }
       }
+      await client.query(loadSchemaSql());
+      await store.assertNoSchemaDrift(client);
       await store.hydrate(notifier);
     } catch (err) {
       // Same best-effort cleanup as the probe path: schema, lock, or
