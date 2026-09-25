@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { sanitizeForPr } from "../redact.js";
 import type { ErrorContext } from "../providers/error-provider.js";
-import type { DiscordEvent, JobNotifier } from "../notify/discord.js";
+import type { DiscordEvent, DiscordJobRef, JobNotifier } from "../notify/discord.js";
 
 export const JOB_STATUSES = [
   "QUEUED",
@@ -96,7 +96,12 @@ export class JobStore {
     const jobs = [...this.jobs.values()].filter(
       (job) => !status || job.status === status,
     );
-    return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return jobs.sort((a, b) =>
+      // Byte-wise on ISO-8601 UTC strings (chronological when the format
+      // is fixed-width like Date.toISOString()): localeCompare() would
+      // make the order depend on the runtime's ICU data.
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
+    );
   }
 
   updateStatus(
@@ -197,10 +202,11 @@ export class JobQueue {
     this.store.create(job);
     if (this.stopped) {
       // The queue is quiescing for shutdown: persist the job so crash
-      // recovery picks it up on the next boot, but don't start a repair
-      // in this process — pump() won't pick it up, so the caller must
-      // not be told it was accepted. (The webhook route maps this to
-      // 503.)
+      // recovery picks it up on the next boot (with the Postgres store;
+      // the in-memory store is best-effort and the job dies with the
+      // process), but don't start a repair in this process — pump()
+      // won't pick it up, so the caller must not be told it was
+      // accepted. (The webhook route maps this to 503.)
       return { accepted: false, deduped: false, job };
     }
     this.pending.push(job.id);
@@ -300,24 +306,34 @@ export class JobQueue {
    */
   private notifyTransition(job: Job | undefined): void {
     if (!job || !this.notifier) return;
+    // Project the narrow DiscordJobRef the event type promises. Custom
+    // notifiers are third-party code, and the full Job carries raw
+    // errorContext, which may hold unredacted secrets — never hand that
+    // to code outside this module.
+    const ref: DiscordJobRef = {
+      id: job.id,
+      repository: job.repository,
+      issueId: job.issueId,
+      provider: job.provider,
+    };
     let event: DiscordEvent | undefined;
     switch (job.status) {
       case "RUNNING":
-        event = { kind: "repair_started", job };
+        event = { kind: "repair_started", job: ref };
         break;
       case "PR_CREATED":
-        event = { kind: "pr_created", job, prUrl: job.prUrl };
+        event = { kind: "pr_created", job: ref, prUrl: job.prUrl };
         break;
       case "FAILED":
       case "TIMED_OUT":
         event = {
           kind: "repair_failed",
-          job,
+          job: ref,
           reason: job.note ?? "unknown reason",
         };
         break;
       case "NEEDS_HUMAN_REVIEW":
-        event = { kind: "needs_review", job, note: job.note };
+        event = { kind: "needs_review", job: ref, note: job.note };
         break;
       default:
         break;

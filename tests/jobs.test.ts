@@ -593,4 +593,41 @@ describe("JobQueue notification hygiene", () => {
       warn.mockRestore();
     }
   });
+
+  it("hands custom notifiers only the narrow job reference", async () => {
+    // JobNotifier is a public interface: custom implementations are
+    // third-party code. The full Job carries raw errorContext (which may
+    // hold unredacted secrets), but the declared event type promises only
+    // the four identifier fields — so hand over exactly those.
+    const store = new JobStore();
+    const events: DiscordEvent[] = [];
+    const notifier: JobNotifier = {
+      notify: async (event) => {
+        events.push(event);
+      },
+    };
+    const handler: JobHandler = async (_job, update) => {
+      update("RUNNING");
+      update("FAILED", { note: "boom" });
+    };
+    const queue = new JobQueue(store, handler, 1, notifier);
+    queue.enqueue(makeJob("narrow-1"));
+    await vi.waitFor(() => {
+      expect(events.length).toBeGreaterThan(0);
+    });
+    for (const event of events) {
+      expect(Object.keys(event.job).sort()).toEqual([
+        "id",
+        "issueId",
+        "provider",
+        "repository",
+      ]);
+    }
+    expect(events[0].job).toMatchObject({
+      id: "job-narrow-1",
+      issueId: "narrow-1",
+      provider: "bugsink",
+      repository: "my-app",
+    });
+  });
 });
