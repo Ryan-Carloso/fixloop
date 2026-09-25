@@ -111,6 +111,18 @@ describe("webhook -> queue integration", () => {
     expect(jobs[0].issueId).toBe("aaaaaaaa-0000-0000-0000-000000000000");
   });
 
+  it("treats an empty ?status= as no filter", async () => {
+    const { app } = buildTestServer();
+    await postWebhook(app, payload);
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs?status=",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toHaveLength(1);
+  });
+
   it("requires the webhook token for GET /jobs", async () => {
     const { app } = buildTestServer();
     await postWebhook(app, payload);

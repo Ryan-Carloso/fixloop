@@ -142,12 +142,14 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       return reply.status(auth.status).send({ error: auth.error });
     }
     const { status } = req.query as { status?: unknown };
-    if (status !== undefined && !isJobStatus(status)) {
+    // An empty ?status= means "no filter" (generated clients); only a
+    // non-empty unknown value is a 400.
+    if (status !== undefined && status !== "" && !isJobStatus(status)) {
       return reply
         .status(400)
         .send({ error: `unknown status: ${String(status)}` });
     }
-    return store.list(status);
+    return store.list(isJobStatus(status) ? status : undefined);
   });
 
   app.get("/jobs/:id", async (req, reply) => {

@@ -32,5 +32,12 @@ export function sanitizeForPr(text: string): string {
         /([a-z][a-z0-9+.-]*:\/\/[^/\s:@]*:)[^@\s/]+@/gi,
         "$1[REDACTED]@",
       )
+      // Webhook URLs (https://discord.com/api/webhooks/<id>/<token>): the
+      // trailing token is a bearer credential for posting as the bot. A
+      // failure reason echoing DISCORD_WEBHOOK_URL=... matches neither the
+      // key=value rule (unknown key name) nor the URL-credential rule, so
+      // without this the token would be posted into the Discord channel.
+      // Two path segments required: a bare /webhooks/<id> carries no secret.
+      .replace(/\/webhooks\/[^\s"'/]+\/[^\s"']+/gi, "/webhooks/[redacted]")
   );
 }

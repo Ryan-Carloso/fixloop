@@ -27,6 +27,20 @@ vi.mock("node:fs", async (importOriginal) => {
     }) as typeof actual.readFileSync,
   };
 });
+
+// Mock pg.Pool so connect() can be exercised without a database when no
+// DbClient is injected. All other tests inject a fake DbClient, so the
+// mock only affects the pool-construction test below.
+const pgControl = vi.hoisted(() => {
+  const query = vi.fn(async () => ({ rows: [] as Record<string, unknown>[] }));
+  const end = vi.fn(async () => {});
+  const Pool = vi.fn((_config: unknown) => ({ query, end }));
+  return { query, end, Pool };
+});
+
+vi.mock("pg", () => ({
+  default: { Pool: pgControl.Pool },
+}));
 import { buildServer } from "../src/server.js";
 import {
   dedupKey,
@@ -677,6 +691,19 @@ describe("PostgresJobStore with the HTTP layer", () => {
 });
 
 describe("PostgresJobStore.connect pool cleanup", () => {
+  it("builds the pool with a bounded connection timeout", async () => {
+    // pg waits forever on connect by default; a black-holed DATABASE_URL
+    // must fail fast instead of hanging boot.
+    pgControl.Pool.mockClear();
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+    );
+    expect(store).toBeInstanceOf(PostgresJobStore);
+    expect(pgControl.Pool).toHaveBeenCalledWith(
+      expect.objectContaining({ connectionTimeoutMillis: 5000 }),
+    );
+  });
+
   it("ends the pool (best-effort) when schema application fails", async () => {
     const { query } = mockDb();
     const end = vi.fn(async () => {});

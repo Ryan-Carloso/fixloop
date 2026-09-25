@@ -106,8 +106,17 @@ describe("sanitizeForPr", () => {
     expect(redacted).not.toContain("sk-live-abc123");
   });
 
+  it("redacts webhook URLs — the token posts as the bot", () => {
+    const input =
+      "env dump: DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/supersecrettoken";
+    const redacted = sanitizeForPr(input);
+    expect(redacted).not.toContain("supersecrettoken");
+    expect(redacted).toContain("/webhooks/[redacted]");
+  });
+
   it("leaves credential-less URLs intact", () => {
-    const input = "GET https://discord.com/api/webhooks/123/abc returned 200";
+    // A bare /webhooks/<id> (single segment) carries no token.
+    const input = "GET https://discord.com/api/webhooks/12345 returned 200";
     expect(sanitizeForPr(input)).toBe(input);
   });
 

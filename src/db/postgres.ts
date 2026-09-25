@@ -181,7 +181,15 @@ export class PostgresJobStore extends JobStore {
     databaseUrl: string,
     db?: DbClient,
   ): Promise<PostgresJobStore> {
-    const client: DbClient = db ?? new pg.Pool({ connectionString: databaseUrl });
+    // Bound the connect phase: pg waits forever by default
+    // (connectionTimeoutMillis: 0), which would hang boot on a black-holed
+    // host instead of failing fast with the clear error below.
+    const client: DbClient =
+      db ??
+      new pg.Pool({
+        connectionString: databaseUrl,
+        connectionTimeoutMillis: 5_000,
+      });
     try {
       await client.query("SELECT 1");
     } catch (err) {

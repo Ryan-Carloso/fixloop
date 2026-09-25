@@ -182,6 +182,20 @@ describe("DiscordNotifier.notify", () => {
     expect(text).not.toContain("ghp_abcdefghij1234567890");
   });
 
+  it("redacts a webhook URL echoed in the failure reason", async () => {
+    // The token in a webhook URL posts as the bot — it must never reach
+    // the channel, even when the reason echoes an env/config dump.
+    await enabledNotifier().notify({
+      kind: "repair_failed",
+      job: jobRef(),
+      reason:
+        "crash; env DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/supersecrettoken",
+    });
+    const text = JSON.stringify(lastPayload());
+    expect(text).not.toContain("supersecrettoken");
+    expect(text).toContain("/webhooks/[redacted]");
+  });
+
   it("never throws when the webhook POST rejects", async () => {
     fetchMock.mockRejectedValueOnce(new Error("network down"));
     await expect(
