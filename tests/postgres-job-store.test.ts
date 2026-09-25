@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   PostgresJobStore,
   loadSchemaSql,
+  makePool,
   rowToJob,
   type DbClient,
 } from "../src/db/postgres.js";
@@ -34,8 +35,11 @@ vi.mock("node:fs", async (importOriginal) => {
 const pgControl = vi.hoisted(() => {
   const query = vi.fn(async () => ({ rows: [] as Record<string, unknown>[] }));
   const end = vi.fn(async () => {});
-  const Pool = vi.fn((_config: unknown) => ({ query, end }));
-  return { query, end, Pool };
+  // The fake pool only needs the DbClient surface plus .on, which
+  // makePool() calls to attach the idle-client error listener.
+  const on = vi.fn((_event: string, _handler: (err: Error) => void) => {});
+  const Pool = vi.fn((_config: unknown) => ({ query, end, on }));
+  return { query, end, Pool, on };
 });
 
 vi.mock("pg", () => ({
@@ -776,9 +780,19 @@ describe("PostgresJobStore shutdown observability", () => {
       );
       const messages = warn.mock.calls.map((c) => String(c[0])).join("\n");
       expect(messages).toContain("skipped 2 corrupt row(s)");
+      expect(messages).toContain("DELETE FROM fixloop_jobs");
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("makePool", () => {
+  it("attaches an idle-client error listener to the pool", () => {
+    makePool("postgres://localhost:5432/fixloop");
+    // Without this listener, node-postgres throws an unhandled 'error'
+    // event and the process exits on idle-client connection failures.
+    expect(pgControl.on).toHaveBeenCalledWith("error", expect.any(Function));
   });
 });
 

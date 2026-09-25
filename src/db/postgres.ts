@@ -37,6 +37,30 @@ export interface DbClient {
   end?(): Promise<void>;
 }
 
+/**
+ * Builds the production pg.Pool. Extracted so tests can assert on the
+ * pool's wiring (notably the idle-client 'error' listener) without
+ * connecting anywhere — the pool is lazy until the first query.
+ */
+export function makePool(databaseUrl: string): pg.Pool {
+  const pool = new pg.Pool({
+    connectionString: databaseUrl,
+    connectionTimeoutMillis: 5_000,
+  });
+  // node-postgres emits idle-client connection failures (Postgres
+  // restart, network blip, firewall idle timeout) as 'error' events on
+  // the pool — not as query rejections, so persist()'s try/catch never
+  // sees them. Without a listener, Node throws an unhandled 'error'
+  // event and the process exits: a transient DB hiccup between repairs
+  // would take down the whole API server.
+  pool.on("error", (err: Error) => {
+    console.warn(
+      `Postgres job store: idle client connection error: ${err.message}`,
+    );
+  });
+  return pool;
+}
+
 const SELECT_ALL = `
   SELECT id, dedup_key, provider, repository, issue_id, status,
          error_context, note, pr_url, created_at, updated_at
@@ -198,12 +222,7 @@ export class PostgresJobStore extends JobStore {
     // Bound the connect phase: pg waits forever by default
     // (connectionTimeoutMillis: 0), which would hang boot on a black-holed
     // host instead of failing fast with the clear error below.
-    const client: DbClient =
-      db ??
-      new pg.Pool({
-        connectionString: databaseUrl,
-        connectionTimeoutMillis: 5_000,
-      });
+    const client: DbClient = db ?? makePool(databaseUrl);
     try {
       await client.query("SELECT 1");
     } catch (err) {
@@ -288,11 +307,12 @@ export class PostgresJobStore extends JobStore {
     }
     if (skipped > 0) {
       // One summary line: skipped rows stay skipped on every boot, so the
-      // operator gets a count instead of only the per-row warnings above.
-      // Inspect with SELECT id, status FROM fixloop_jobs; remove bad rows
-      // with DELETE FROM fixloop_jobs WHERE id = '<id>';
+      // operator gets a count plus the manual cleanup step instead of
+      // only the per-row warnings above.
       console.warn(
-        `Postgres job store: skipped ${skipped} corrupt row(s) during hydration; they are invisible to the API until removed.`,
+        `Postgres job store: skipped ${skipped} corrupt row(s) during hydration; ` +
+          `they are invisible to the API until removed manually, e.g. ` +
+          `DELETE FROM fixloop_jobs WHERE id = '<id>';`,
       );
     }
   }
