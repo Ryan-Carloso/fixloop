@@ -68,6 +68,73 @@ describe("resolveStore", () => {
       error.mockRestore();
     }
   });
+
+  it("throws instead of silently booting in-memory when the injected exit() returns", async () => {
+    // deps.exit is typed never, but a test double (or a future runtime)
+    // may return: falling through would boot the in-memory store after a
+    // Postgres failure, silently losing the operator's database.
+    const connect = vi.fn(
+      async (_url: string): Promise<PostgresJobStore> => {
+        throw new Error("connect ECONNREFUSED");
+      },
+    );
+    const exit = vi.fn((_code: number): never => undefined as never);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        resolveStore("postgres://db:5432/fixloop", { connect, exit }),
+      ).rejects.toThrow(/refusing to boot/i);
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("registers graceful shutdown handlers on the in-memory path", async () => {
+    // Regression: only the Postgres branch called registerShutdown(), so
+    // SIGTERM killed in-memory boots mid-repair instead of quiescing the
+    // queue and stopping HTTP.
+    const dir = mkdtempSync(join(tmpdir(), "fixloop-main-shutdown-"));
+    writeFileSync(join(dir, "fixloop.config.yaml"), "repositories: {}\n");
+    const prevEnv = {
+      FIXLOOP_CONFIG: process.env.FIXLOOP_CONFIG,
+      FIXLOOP_PORT: process.env.FIXLOOP_PORT,
+      DATABASE_URL: process.env.DATABASE_URL,
+      FIXLOOP_WEBHOOK_SECRET: process.env.FIXLOOP_WEBHOOK_SECRET,
+    };
+    process.env.FIXLOOP_CONFIG = join(dir, "fixloop.config.yaml");
+    process.env.FIXLOOP_PORT = "0";
+    delete process.env.DATABASE_URL;
+    process.env.FIXLOOP_WEBHOOK_SECRET = "test-secret";
+    const on = vi.spyOn(process, "on");
+    try {
+      const app = await main({});
+      try {
+        const signals = on.mock.calls.map((call) => String(call[0]));
+        expect(signals).toContain("SIGTERM");
+        expect(signals).toContain("SIGINT");
+      } finally {
+        await app.close();
+      }
+      // Detach the real signal handlers this registered: their shutdown
+      // closure ends in process.exit, which must not fire during tests.
+      for (const call of on.mock.calls) {
+        const signal = String(call[0]);
+        if (signal === "SIGTERM" || signal === "SIGINT") {
+          process.removeListener(
+            signal,
+            call[1] as (...args: never[]) => void,
+          );
+        }
+      }
+    } finally {
+      on.mockRestore();
+      for (const [key, value] of Object.entries(prevEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 });
 
 describe("main()", () => {

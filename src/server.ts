@@ -409,6 +409,13 @@ export async function resolveStore(
       `Failed to initialize Postgres job store: ${err instanceof Error ? err.message : String(err)}`,
     );
     (deps.exit ?? process.exit)(1);
+    // The exit() type claims never, but an injected double (or a future
+    // runtime) may return: falling through would silently boot the
+    // in-memory store after a Postgres failure, losing the operator's
+    // database. Refuse instead.
+    throw new Error(
+      "Postgres job store initialization failed; refusing to boot without it.",
+    );
   }
 }
 
@@ -468,9 +475,29 @@ export async function main(
   } else {
     // Reuse the notifier built above so crash recovery and the queue
     // share one instance. Thread deps.handleJob like the Postgres branch:
-    // buildServer() honors it, and dropping it here would silently run
-    // stubHandler instead of the caller's handler on the in-memory path.
-    app = buildServer({ config, notifier, handleJob: deps.handleJob });
+    // the queue is built explicitly here (instead of letting buildServer
+    // create it) so shutdown can quiesce it below.
+    const store = new JobStore();
+    const queue = new JobQueue(
+      store,
+      deps.handleJob ?? stubHandler,
+      1,
+      notifier,
+    );
+    app = buildServer({ config, store, queue, notifier });
+    // Mirror the Postgres branch's graceful shutdown: quiesce the queue
+    // (let the active repair finish) and stop HTTP on SIGTERM/SIGINT.
+    // The in-memory store has no write-behind to flush, so its closer is
+    // a no-op.
+    registerShutdown(
+      { close: async () => {} },
+      {
+        beforeClose: async () => {
+          await queue.stop();
+          await app.close();
+        },
+      },
+    );
   }
   await app.listen({ port, host });
   return app;
