@@ -6,6 +6,7 @@ import {
   errorContextSchema,
   type ErrorContext,
 } from "../providers/error-provider.js";
+import { sanitizeForPr } from "../redact.js";
 
 /**
  * Loads src/db/schema.sql (copied next to dist/db/schema.sql by the
@@ -464,9 +465,10 @@ export class PostgresJobStore extends JobStore {
           try {
             await notifier.notify(event);
           } catch (err) {
-            console.warn(
-              `notification failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
+            // Same policy as JobQueue: the notifier is an injection point,
+            // so a rejection message may carry secrets — sanitize it.
+            const message = err instanceof Error ? err.message : String(err);
+            console.warn(`notification failed: ${sanitizeForPr(message)}`);
           }
         }),
       );

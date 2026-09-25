@@ -419,3 +419,81 @@ describe("JobStore.updateStatus note sanitization", () => {
     }
   });
 });
+
+describe("JobQueue notification hygiene", () => {
+  it("sanitizes third-party notifier rejection messages before logging", async () => {
+    // JobNotifier is an injection point: a custom notifier may reject
+    // with a secret-bearing message (connection string, token in URL).
+    const store = new JobStore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const leakyNotifier = {
+        notify: async (): Promise<void> => {
+          throw new Error("webhook failed: token=ghp_abcdefghij1234567890");
+        },
+      };
+      const queue = new JobQueue(
+        store,
+        async (_job, update) => {
+          update("RUNNING");
+        },
+        1,
+        leakyNotifier,
+      );
+      queue.enqueue(makeJob("leaky-1"));
+      await tick(50);
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).toContain("notification failed");
+      expect(warnings).not.toContain("ghp_abcdefghij1234567890");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("notifies only on actual status changes, not repeat updates", async () => {
+    // A handler calling update("RUNNING") twice (e.g. around an internal
+    // retry) must not emit duplicate repair_started embeds.
+    const store = new JobStore();
+    const kinds: string[] = [];
+    const notifier = {
+      notify: async (event: { kind: string }): Promise<void> => {
+        kinds.push(event.kind);
+      },
+    };
+    const queue = new JobQueue(
+      store,
+      async (_job, update) => {
+        update("RUNNING");
+        update("RUNNING");
+      },
+      1,
+      notifier,
+    );
+    queue.enqueue(makeJob("dup-1"));
+    await tick(50);
+    expect(kinds.filter((k) => k === "repair_started")).toHaveLength(1);
+  });
+
+  it("logs the error stack when a handler throws after a terminal state", async () => {
+    // The FAILED transition is ignored by the terminal guard (which logs
+    // the message via the note); without this, the stack — the part an
+    // operator needs to diagnose a post-PR failure — is never logged.
+    const store = new JobStore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const handler: JobHandler = async (_job, update) => {
+        update("PR_CREATED", { prUrl: "https://example.com/pr/1" });
+        const err = new Error("post-pr boom");
+        err.stack = "Error: post-pr boom\n    at diagnosis-marker";
+        throw err;
+      };
+      const queue = new JobQueue(store, handler);
+      queue.enqueue(makeJob("termstack-1"));
+      await tick(50);
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).toContain("at diagnosis-marker");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

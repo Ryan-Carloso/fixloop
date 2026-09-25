@@ -231,16 +231,34 @@ export class JobQueue {
     const update: JobUpdate = (status, patch) => {
       // Notes are sanitized inside JobStore.updateStatus (the single sink),
       // so every caller is covered without each one remembering to do it.
+      // Notify only on actual transitions: a handler calling update() twice
+      // with the same status (e.g. around an internal retry) must not emit
+      // duplicate notifications.
+      const before = this.store.get(id)?.status;
       const updated = this.store.updateStatus(id, status, patch);
-      this.notifyTransition(updated);
+      if (updated && updated.status !== before) {
+        this.notifyTransition(updated);
+      }
     };
     update("RUNNING");
     try {
       await this.handler(job, update);
     } catch (err) {
+      const before = this.store.get(id)?.status;
       update("FAILED", {
         note: err instanceof Error ? err.message : String(err),
       });
+      if (before !== undefined && TERMINAL_STATUSES.has(before)) {
+        // The FAILED transition was just ignored by the terminal guard:
+        // the error's message reaches the guard's warning via the note,
+        // but the stack — what the operator needs to diagnose a post-PR
+        // failure — would otherwise never be logged.
+        const stack =
+          err instanceof Error && err.stack ? err.stack : String(err);
+        console.warn(
+          `handler for job ${id} threw after reaching terminal status ${before}: ${sanitizeForPr(stack)}`,
+        );
+      }
     }
   }
 
@@ -278,9 +296,11 @@ export class JobQueue {
     }
     if (event) {
       const report = (err: unknown): void => {
-        console.warn(
-          `notification failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        // The notifier is an injection point: a third-party notifier may
+        // reject with a secret-bearing message (connection string, token
+        // in URL). Sanitize before it reaches stdout.
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`notification failed: ${sanitizeForPr(message)}`);
       };
       try {
         // A synchronous throw from notify() is caught here; a rejection is
