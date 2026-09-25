@@ -106,6 +106,26 @@ describe("sanitizeForPr", () => {
     expect(redacted).not.toContain("sk-live-abc123");
   });
 
+  it("redacts compound secret keys", () => {
+    // client_secret= / access_token= / api_key_id= never matched the old
+    // bare-keyword pattern (no word boundary inside the compound name).
+    const input =
+      'auth failed: {"client_secret": "abc123", "access_token": "tok456"} api_key_id=key789';
+    const redacted = sanitizeForPr(input);
+    expect(redacted).not.toContain("abc123");
+    expect(redacted).not.toContain("tok456");
+    expect(redacted).not.toContain("key789");
+  });
+
+  it("preserves JSON structure when redacting key=value secrets", () => {
+    // The old replacement destroyed the quotes and separator
+    // ({"password":"hunter2"} -> {"password=[REDACTED]}); keep the text
+    // valid-looking so log context stays readable.
+    expect(sanitizeForPr('{"password":"hunter2","user":"bob"}')).toBe(
+      '{"password":"[REDACTED]","user":"bob"}',
+    );
+  });
+
   it("redacts webhook URLs — the token posts as the bot", () => {
     const input =
       "env dump: DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/supersecrettoken";

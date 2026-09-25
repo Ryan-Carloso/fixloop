@@ -144,4 +144,40 @@ describe("main()", () => {
       }
     }
   });
+
+  it("warns once at startup when Discord notifications are disabled", async () => {
+    // The per-instance constructor warning moved to main(): production
+    // builds exactly one notifier here, so the operator gets one line,
+    // and throwaway instances in tests stay quiet.
+    const dir = mkdtempSync(join(tmpdir(), "fixloop-main-warn-"));
+    writeFileSync(join(dir, "fixloop.config.yaml"), "repositories: {}\n");
+    const prevEnv = {
+      FIXLOOP_CONFIG: process.env.FIXLOOP_CONFIG,
+      FIXLOOP_PORT: process.env.FIXLOOP_PORT,
+      DATABASE_URL: process.env.DATABASE_URL,
+      DISCORD_WEBHOOK_URL: process.env.DISCORD_WEBHOOK_URL,
+    };
+    process.env.FIXLOOP_CONFIG = join(dir, "fixloop.config.yaml");
+    process.env.FIXLOOP_PORT = "0";
+    delete process.env.DATABASE_URL;
+    delete process.env.DISCORD_WEBHOOK_URL;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const app = await main({});
+      try {
+        const disabledWarnings = warn.mock.calls
+          .map((c) => String(c[0]))
+          .filter((m) => m.includes("DISCORD_WEBHOOK_URL"));
+        expect(disabledWarnings).toHaveLength(1);
+      } finally {
+        await app.close();
+      }
+    } finally {
+      warn.mockRestore();
+      for (const [key, value] of Object.entries(prevEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 });

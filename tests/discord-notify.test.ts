@@ -86,10 +86,10 @@ describe("DiscordNotifier.fromEnv", () => {
     expect(notifier.enabled).toBe(false);
   });
 
-  it("logs the disabled warning once per disabled instance", () => {
-    // No module-reset dance: the warning is per-instance state, so every
-    // fresh import behaves identically (production builds one notifier at
-    // startup and warns exactly once).
+  it("is silent: building disabled instances logs no warning", () => {
+    // The disabled warning moved to main() (warn once at startup);
+    // fromEnv() stays quiet so throwaway instances in tests and library
+    // callers don't spam.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       DiscordNotifier.fromEnv({});
@@ -97,13 +97,32 @@ describe("DiscordNotifier.fromEnv", () => {
       DiscordNotifier.fromEnv({
         DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/EXAMPLE",
       });
-      const disabledWarnings = warn.mock.calls.filter(([msg]) =>
-        String(msg).includes("DISCORD_WEBHOOK_URL"),
-      );
-      expect(disabledWarnings).toHaveLength(2);
+      expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("disables the notifier for non-Discord webhook URLs", () => {
+    // A mis-set URL would otherwise POST job details to an arbitrary
+    // host; only https:// Discord webhook endpoints are accepted.
+    for (const url of [
+      "https://example.com/api/webhooks/123/abc",
+      "https://discord.com.evil.com/api/webhooks/123/abc",
+      "http://discord.com/api/webhooks/123/abc",
+      "https://discord.com/not-webhooks/123/abc",
+      "not a url",
+    ]) {
+      expect(
+        DiscordNotifier.fromEnv({ DISCORD_WEBHOOK_URL: url }).enabled,
+        url,
+      ).toBe(false);
+    }
+    expect(
+      DiscordNotifier.fromEnv({
+        DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/123/abc",
+      }).enabled,
+    ).toBe(true);
   });
 });
 
@@ -148,6 +167,32 @@ describe("DiscordNotifier.notify", () => {
       "\\[click me\\]\\(https://evil.example/phish\\)",
     );
     expect(JSON.stringify(embed)).not.toContain("[click me](");
+  });
+
+  it("escapes markdown in repository, provider, and job id fields too", async () => {
+    // issueId is the directly webhook-controlled value, but repository
+    // and provider flow into the same embeds: escape them uniformly so a
+    // hostile value cannot plant a masked link in any field.
+    const hostile = {
+      id: "job-[x](https://evil.example/i)",
+      repository: "[repo](https://evil.example/r)",
+      issueId: "issue-1",
+      provider: "[p](https://evil.example/p)",
+    };
+    await enabledNotifier().notify({ kind: "repair_started", job: hostile });
+    const embed = lastPayload().embeds[0];
+    const fields = Object.fromEntries(
+      embed.fields.map((f: { name: string; value: string }) => [f.name, f.value]),
+    );
+    expect(fields["Job"]).toBe("job-\\[x\\]\\(https://evil.example/i\\)");
+    expect(fields["Repository"]).toBe(
+      "\\[repo\\]\\(https://evil.example/r\\)",
+    );
+    expect(fields["Issue"]).toBe(
+      "\\[p\\]\\(https://evil.example/p\\):issue-1",
+    );
+    expect(JSON.stringify(embed)).not.toContain("[repo](");
+    expect(JSON.stringify(embed)).not.toContain("[p](");
   });
 
   it("posts a pr_created embed containing the PR URL", async () => {
@@ -298,6 +343,30 @@ describe("DiscordNotifier.notify", () => {
       expect(warn).toHaveBeenCalled();
       expect(logged).not.toContain("supersecrettoken");
       expect(logged).not.toContain("%2Fwebhooks%2F123%2F");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("scrubs fetch errors through the shared sanitizer, not just the webhook URL", async () => {
+    // The error text goes through sanitizeForPr (single code path for
+    // token patterns): a leaked api key in the same message must be
+    // redacted too, not only the webhook URL segments.
+    const url = "https://discord.com/api/webhooks/123/supersecrettoken";
+    const notifier = DiscordNotifier.fromEnv({ DISCORD_WEBHOOK_URL: url });
+    fetchMock.mockRejectedValueOnce(
+      new TypeError(`fetch failed: password=hunter2 for ${url}`),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await notifier.notify({ kind: "repair_started", job: jobRef() });
+      const logged = warn.mock.calls
+        .map((call) => String(call[0]))
+        .join("\n");
+      expect(warn).toHaveBeenCalled();
+      expect(logged).not.toContain("hunter2");
+      expect(logged).toContain("password=[REDACTED]");
+      expect(logged).not.toContain(url);
     } finally {
       warn.mockRestore();
     }

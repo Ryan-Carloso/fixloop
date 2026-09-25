@@ -38,16 +38,25 @@ interface EmbedField {
 }
 
 function jobFields(job: DiscordJobRef): EmbedField[] {
+  // Every value here can carry webhook-controlled content (issueId
+  // directly; repository/provider via config that mirrors the payload),
+  // so escape them all: an unescaped `[text](url)` would render a masked
+  // link inside a trusted FixLoop notification (phishing vector).
   return [
-    { name: "Job", value: truncateField(job.id), inline: true },
-    { name: "Repository", value: truncateField(job.repository), inline: true },
+    {
+      name: "Job",
+      value: truncateField(escapeDiscordMarkdown(job.id)),
+      inline: true,
+    },
+    {
+      name: "Repository",
+      value: truncateField(escapeDiscordMarkdown(job.repository)),
+      inline: true,
+    },
     {
       name: "Issue",
-      // issueId comes from the external webhook payload: escape it so a
-      // hostile value cannot render a masked link inside a trusted
-      // FixLoop notification (see escapeDiscordMarkdown).
       value: truncateField(
-        `${job.provider}:${escapeDiscordMarkdown(job.issueId)}`,
+        `${escapeDiscordMarkdown(job.provider)}:${escapeDiscordMarkdown(job.issueId)}`,
       ),
       inline: true,
     },
@@ -98,7 +107,7 @@ function buildEmbed(event: DiscordEvent): Record<string, unknown> {
   switch (event.kind) {
     case "repair_started":
       title = "🔧 FixLoop: repair started";
-      rawDescription = `Repair pipeline started for **${event.job.provider}** issue **${escapeDiscordMarkdown(event.job.issueId)}**.`;
+      rawDescription = `Repair pipeline started for **${escapeDiscordMarkdown(event.job.provider)}** issue **${escapeDiscordMarkdown(event.job.issueId)}**.`;
       color = COLORS.started;
       break;
     case "pr_created":
@@ -150,24 +159,40 @@ function buildEmbed(event: DiscordEvent): Record<string, unknown> {
  *
  * The webhook URL comes from the DISCORD_WEBHOOK_URL environment variable
  * (collected by `fixloop setup` and stored in the install .env file).
- * When it is unset the notifier is a silent no-op (a warning is logged once
- * per disabled instance; production builds one at startup). notify() never throws: a failing webhook must never
- * break the repair pipeline.
+ * When it is unset (or not a valid Discord webhook URL) the notifier is
+ * a silent no-op — main() warns once at startup instead of warning per
+ * instance here, so throwaway instances built by tests and library
+ * callers stay quiet. notify() never throws: a failing webhook must
+ * never break the repair pipeline.
  */
 export class DiscordNotifier implements JobNotifier {
-  private constructor(private readonly webhookUrl?: string) {
-    if (!webhookUrl) {
-      // One warning per disabled instance (production builds a single
-      // notifier at startup). Per-instance state keeps tests isolated —
-      // no module-global flag to reset between cases.
-      console.warn(
-        "DISCORD_WEBHOOK_URL is not set; Discord notifications are disabled.",
-      );
-    }
-  }
+  private constructor(private readonly webhookUrl?: string) {}
 
+  /**
+   * Builds a notifier from DISCORD_WEBHOOK_URL. Silent by design (see
+   * above). The URL is validated to be an https:// Discord webhook
+   * endpoint: a mis-set value would otherwise POST job details to an
+   * arbitrary host (exfiltration/SSRF), and a non-HTTPS URL would send
+   * them in cleartext. Invalid values disable the notifier — check
+   * `.enabled` when the distinction matters.
+   */
   static fromEnv(env: NodeJS.ProcessEnv = process.env): DiscordNotifier {
-    const url = env.DISCORD_WEBHOOK_URL?.trim() || undefined;
+    const raw = env.DISCORD_WEBHOOK_URL?.trim() || undefined;
+    let url: string | undefined;
+    if (raw) {
+      try {
+        const parsed = new URL(raw);
+        if (
+          parsed.protocol === "https:" &&
+          /(^|\.)discord\.com$/.test(parsed.hostname) &&
+          parsed.pathname.startsWith("/api/webhooks/")
+        ) {
+          url = raw;
+        }
+      } catch {
+        // Not a URL at all: stay disabled.
+      }
+    }
     return new DiscordNotifier(url);
   }
 
@@ -199,15 +224,14 @@ export class DiscordNotifier implements JobNotifier {
       // Notifications must never break the repair pipeline. fetch() throws
       // with the full request URL in the message when the configured URL is
       // malformed — the URL embeds the secret token, so redact it before it
-      // can reach the logs. Redact the exact URL, the /webhooks/ id/token
-      // segments (in case an error surfaces just the path), and the
-      // percent-encoded form (in case an error surfaces the URL encoded).
+      // can reach the logs. The exact configured URL is redacted literally
+      // (it is the secret value itself, not a pattern); everything else
+      // goes through sanitizeForPr so token patterns are scrubbed by one
+      // shared code path instead of a bespoke regex chain here.
       const message = err instanceof Error ? err.message : String(err);
-      const scrubbed = message
-        .split(webhookUrl)
-        .join("[redacted]")
-        .replace(/\/webhooks\/[^\s"']+/gi, "/webhooks/[redacted]")
-        .replace(/%2Fwebhooks%2F[^\s"']+/gi, "[redacted]");
+      const scrubbed = sanitizeForPr(
+        message.split(webhookUrl).join("[redacted]"),
+      );
       console.warn(`Discord notification failed: ${scrubbed}`);
     }
   }
