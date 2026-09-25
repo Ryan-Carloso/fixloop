@@ -54,6 +54,11 @@ function mockDb() {
   return { query, queries, rowsQueue, client };
 }
 
+/** Lets the fire-and-forget write-behind chain settle. */
+function flushWriteBehind(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 function makeJob(overrides: Partial<Job> = {}): Job {
   const now = new Date().toISOString();
   return {
@@ -265,11 +270,6 @@ describe("rowToJob", () => {
 });
 
 describe("PostgresJobStore persistence", () => {
-  /** Lets the fire-and-forget write-behind chain settle. */
-  function flushWriteBehind(): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, 10));
-  }
-
   it("create() writes the job with an INSERT using bound parameters", async () => {
     const { client, queries } = mockDb();
     const store = await PostgresJobStore.connect(
@@ -376,6 +376,58 @@ describe("PostgresJobStore persistence", () => {
     expect(committed).toEqual(["QUEUED", "FAILED"]);
   });
 
+  it("flush() waits for in-flight write-behind chains before resolving", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const query = vi.fn(
+      async (
+        text: string,
+      ): Promise<{ rows: Record<string, unknown>[] }> => {
+        if (text.includes("INSERT INTO fixloop_jobs")) await gate;
+        return { rows: [] };
+      },
+    );
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      { query },
+    );
+    store.create(makeJob());
+    await flushWriteBehind(); // let the write reach the gate
+
+    let flushed = false;
+    const flushing = store.flush().then(() => {
+      flushed = true;
+    });
+    await flushWriteBehind();
+    expect(flushed).toBe(false); // write still gated
+    release();
+    await flushing;
+    expect(flushed).toBe(true);
+  });
+
+  it("close() flushes pending writes and ends the pool", async () => {
+    const { query } = mockDb();
+    const end = vi.fn(async () => {});
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      { query, end },
+    );
+    const job = makeJob();
+    store.create(job);
+    await store.close();
+    expect(end).toHaveBeenCalledTimes(1);
+    // The gated write committed before the pool closed.
+    expect(
+      query.mock.calls.some(
+        ([text, params]) =>
+          text.includes("INSERT INTO fixloop_jobs") &&
+          (params as unknown[])[0] === job.id,
+      ),
+    ).toBe(true);
+  });
+
   it("keeps working (in-memory) when a write fails, and warns loudly", async () => {
     const { client, query } = mockDb();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -398,19 +450,51 @@ describe("PostgresJobStore persistence", () => {
     );
   });
 
-  it("preserves active-job deduplication across restarts", async () => {
+  it("recovers jobs orphaned mid-repair as FAILED so they stop blocking dedup", async () => {
+    // Crash recovery: a row stuck in a transient status (the process died
+    // mid-repair) must not stay "active" forever, or findActiveByDedupKey
+    // would silently drop every future repair for the same issue.
+    const { client, rowsQueue, queries } = mockDb();
+    const key = dedupKey("bugsnink", "demo/repo", "ISSUE-9");
+    const orphaned = makeJob({ dedupKey: key, status: "VERIFYING" });
+    rowsQueue.push([jobRow(orphaned)]);
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    await flushWriteBehind();
+
+    expect(store.get(orphaned.id)).toMatchObject({
+      status: "FAILED",
+      note: "interrupted by server restart",
+    });
+    expect(store.findActiveByDedupKey(key)).toBeUndefined();
+    // The correction is written back to Postgres, not just the Map.
+    const correction = queries.find(
+      (q) => q.params?.[0] === orphaned.id && q.params?.[5] === "FAILED",
+    );
+    expect(correction?.text).toContain("ON CONFLICT (id) DO UPDATE");
+  });
+
+  it("keeps PR_CREATED rows blocking dedup across restarts", async () => {
+    // The fix PR exists on GitHub whether or not we restarted: re-repairing
+    // would open a duplicate.
     const { client, rowsQueue } = mockDb();
     const key = dedupKey("bugsnink", "demo/repo", "ISSUE-9");
     rowsQueue.push([
-      jobRow(makeJob({ dedupKey: key, status: "FAILED" })),
-      jobRow(makeJob({ dedupKey: key, status: "VERIFYING" })),
+      jobRow(
+        makeJob({
+          dedupKey: key,
+          status: "PR_CREATED",
+          prUrl: "https://github.com/o/r/pull/7",
+        }),
+      ),
     ]);
     const store = await PostgresJobStore.connect(
       "postgres://localhost:5432/fixloop",
       client,
     );
-    expect(store.findActiveByDedupKey(key)?.status).toBe("VERIFYING");
-    expect(store.findActiveByDedupKey("bugsnink:other:1")).toBeUndefined();
+    expect(store.findActiveByDedupKey(key)?.status).toBe("PR_CREATED");
   });
 
   it("lists newest-first from hydrated rows", async () => {

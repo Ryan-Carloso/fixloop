@@ -214,6 +214,19 @@ describe("JobQueue", () => {
     expect(store.get("job-9")!.note).not.toContain("supersecret123");
   });
 
+  it("sanitizes notes set explicitly by the handler, not just thrown errors", async () => {
+    const store = new JobStore();
+    const handler: JobHandler = async (_job, update) => {
+      update("NEEDS_HUMAN_REVIEW", { note: "token=supersecret456" });
+    };
+    const queue = new JobQueue(store, handler);
+    queue.enqueue(makeJob("9"));
+    await tick(50);
+    expect(store.get("job-9")!.status).toBe("NEEDS_HUMAN_REVIEW");
+    expect(store.get("job-9")!.note).toBe("token=[REDACTED]");
+    expect(store.get("job-9")!.note).not.toContain("supersecret456");
+  });
+
   it("different issues do not deduplicate each other", () => {
     const store = new JobStore();
     const queue = new JobQueue(store, async () => {});

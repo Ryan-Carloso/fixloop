@@ -156,17 +156,24 @@ export class JobQueue {
     const job = this.store.get(id);
     if (!job) return;
     const update: JobUpdate = (status, patch) => {
-      const updated = this.store.updateStatus(id, status, patch);
+      // Notes can carry raw error text (command output, env dumps) from any
+      // call site; sanitize once here so every sink (DB, API, Discord)
+      // stays redacted.
+      const updated = this.store.updateStatus(
+        id,
+        status,
+        patch?.note === undefined
+          ? patch
+          : { ...patch, note: sanitizeForPr(patch.note) },
+      );
       this.notifyTransition(updated);
     };
     update("RUNNING");
     try {
       await this.handler(job, update);
     } catch (err) {
-      // err.message can echo secrets (command output, env dumps). Sanitize
-      // at capture so every sink (DB, API, Discord) stays redacted.
       update("FAILED", {
-        note: sanitizeForPr(err instanceof Error ? err.message : String(err)),
+        note: err instanceof Error ? err.message : String(err),
       });
     }
   }

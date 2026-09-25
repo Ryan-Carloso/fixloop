@@ -58,64 +58,71 @@ const MAX_DESCRIPTION_LENGTH = 4096;
 // from the external webhook payload and is unbounded.
 const MAX_FIELD_LENGTH = 1024;
 
-/** Truncate over-long text so the embed stays within Discord's limits. */
-function truncate(text: string): string {
-  if (text.length <= MAX_DESCRIPTION_LENGTH) return text;
-  return `${text.slice(0, MAX_DESCRIPTION_LENGTH - 1)}…`;
+/** Truncate over-long text to an explicit character budget. */
+function truncateTo(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
 }
 
 /** Truncate over-long embed field values (1024-char field cap). */
 function truncateField(text: string): string {
-  if (text.length <= MAX_FIELD_LENGTH) return text;
-  return `${text.slice(0, MAX_FIELD_LENGTH - 1)}…`;
+  return truncateTo(text, MAX_FIELD_LENGTH);
 }
 
+// Discord allows 6000 characters per embed in total (title, description
+// and fields combined).
+const MAX_TOTAL_LENGTH = 6000;
+
 function buildEmbed(event: DiscordEvent): Record<string, unknown> {
-  const base = {
-    fields: jobFields(event.job),
-    timestamp: new Date().toISOString(),
-  };
+  const fields = jobFields(event.job);
+  let title: string;
+  let rawDescription: string;
+  let color: number;
   switch (event.kind) {
     case "repair_started":
-      return {
-        ...base,
-        title: "🔧 FixLoop: repair started",
-        description: `Repair pipeline started for **${event.job.provider}** issue **${event.job.issueId}**.`,
-        color: COLORS.started,
-      };
+      title = "🔧 FixLoop: repair started";
+      rawDescription = `Repair pipeline started for **${event.job.provider}** issue **${event.job.issueId}**.`;
+      color = COLORS.started;
+      break;
     case "pr_created":
-      return {
-        ...base,
-        title: "✅ FixLoop: fix PR created",
-        description: event.prUrl
-          ? `Fix verified and PR opened: ${event.prUrl}`
-          : "Fix verified and PR opened (URL not recorded).",
-        color: COLORS.prCreated,
-      };
-    case "repair_failed": {
+      title = "✅ FixLoop: fix PR created";
+      rawDescription = event.prUrl
+        ? `Fix verified and PR opened: ${event.prUrl}`
+        : "Fix verified and PR opened (URL not recorded).";
+      color = COLORS.prCreated;
+      break;
+    case "repair_failed":
       // The reason may echo error output; redact secret-looking values
-      // before it leaves the machine (same policy as public PR bodies),
-      // and truncate so chatty errors stay within Discord's embed limits.
-      const description = truncate(`**Reason:** ${sanitizeForPr(event.reason)}`);
-      return {
-        ...base,
-        title: "❌ FixLoop: repair failed",
-        description,
-        color: COLORS.failed,
-      };
-    }
-    case "needs_review": {
-      const description = event.note
-        ? truncate(`**Note:** ${sanitizeForPr(event.note)}`)
+      // before it leaves the machine (same policy as public PR bodies).
+      title = "❌ FixLoop: repair failed";
+      rawDescription = `**Reason:** ${sanitizeForPr(event.reason)}`;
+      color = COLORS.failed;
+      break;
+    case "needs_review":
+      title = "👀 FixLoop: repair needs human review";
+      rawDescription = event.note
+        ? `**Note:** ${sanitizeForPr(event.note)}`
         : "The repair pipeline did not produce a verified fix.";
-      return {
-        ...base,
-        title: "👀 FixLoop: repair needs human review",
-        description,
-        color: COLORS.needsReview,
-      };
-    }
+      color = COLORS.needsReview;
+      break;
   }
+  // The description is the largest and most expendable part: give it the
+  // 4096-char cap minus whatever the title and fields already consume, so
+  // the whole embed always fits Discord's 6000-char total budget.
+  const fixedLength =
+    title.length +
+    fields.reduce((n, f) => n + f.name.length + f.value.length, 0);
+  const description = truncateTo(
+    rawDescription,
+    Math.min(MAX_DESCRIPTION_LENGTH, Math.max(0, MAX_TOTAL_LENGTH - fixedLength)),
+  );
+  return {
+    fields,
+    timestamp: new Date().toISOString(),
+    title,
+    description,
+    color,
+  };
 }
 
 /**
@@ -155,6 +162,9 @@ export class DiscordNotifier implements JobNotifier {
       const res = await fetch(webhookUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        // Bound the request: a hung webhook connection must not leave the
+        // fire-and-forget promise and its socket open indefinitely.
+        signal: AbortSignal.timeout(10_000),
         body: JSON.stringify({
           username: "FixLoop",
           embeds: [buildEmbed(event)],

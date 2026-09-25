@@ -187,6 +187,17 @@ async function main(): Promise<void> {
   }
 
   const app = buildServer({ config, store });
+  if (store instanceof PostgresJobStore) {
+    // Flush the write-behind chains and close the pool on shutdown, so the
+    // final transitions are not lost and no sockets are left dangling.
+    const pgStore = store;
+    const shutdown = async (): Promise<void> => {
+      await pgStore.close().catch(() => {});
+      process.exit(0);
+    };
+    process.on("SIGTERM", () => void shutdown());
+    process.on("SIGINT", () => void shutdown());
+  }
   await app.listen({ port, host });
 }
 

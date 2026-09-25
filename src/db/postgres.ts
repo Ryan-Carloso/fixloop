@@ -52,6 +52,23 @@ const UPSERT_JOB = `
     updated_at = EXCLUDED.updated_at
 `;
 
+/**
+ * Statuses describing work that can never survive a restart: the process
+ * died mid-repair, so whatever they describe is gone. PR_CREATED is
+ * deliberately excluded — the fix PR exists on GitHub whether or not we
+ * restarted, so the row keeps blocking duplicate repairs.
+ */
+const CRASHED_STATUSES: ReadonlySet<JobStatus> = new Set([
+  "QUEUED",
+  "RUNNING",
+  "REPRODUCING",
+  "FIXING",
+  "VERIFYING",
+]);
+
+/** Note recorded when a restart orphans a mid-repair job. */
+const RESTART_NOTE = "interrupted by server restart";
+
 function toIso(value: unknown): string {
   return value instanceof Date ? value.toISOString() : String(value);
 }
@@ -169,8 +186,17 @@ export class PostgresJobStore extends JobStore {
   private async hydrate(): Promise<void> {
     const { rows } = await this.db.query(SELECT_ALL);
     for (const row of rows) {
+      const job = rowToJob(row);
       // Bypass the write-behind: these rows are already in Postgres.
-      super.create(rowToJob(row));
+      super.create(job);
+      if (CRASHED_STATUSES.has(job.status)) {
+        // Crash recovery: the previous process died mid-repair, so this
+        // status can never become true again. It must not stay "active" —
+        // findActiveByDedupKey would otherwise block future repairs for
+        // the same issue forever, with no operator signal. The correction
+        // goes through the write-behind so the DB row is fixed as well.
+        this.updateStatus(job.id, "FAILED", { note: RESTART_NOTE });
+      }
     }
   }
 
@@ -222,5 +248,22 @@ export class PostgresJobStore extends JobStore {
         err,
       );
     }
+  }
+
+  /**
+   * Awaits all in-flight write-behind chains. Call before shutdown so the
+   * final transitions are not lost.
+   */
+  async flush(): Promise<void> {
+    await Promise.all([...this.persistChains.values()]);
+  }
+
+  /**
+   * Flushes pending writes, then closes the underlying database pool.
+   * Never throws — safe to call during shutdown.
+   */
+  async close(): Promise<void> {
+    await this.flush();
+    await this.db.end?.().catch(() => {});
   }
 }

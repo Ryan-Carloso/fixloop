@@ -252,6 +252,31 @@ describe("DiscordNotifier.notify", () => {
       embed.fields.find((f: { name: string }) => f.name === "Issue").value,
     ).toContain("bugsink:");
   });
+
+  it("keeps the whole embed within Discord's 6000-char total limit", async () => {
+    await enabledNotifier().notify({
+      kind: "repair_failed",
+      job: { ...jobRef(), issueId: "i".repeat(5000) },
+      reason: "x".repeat(10000),
+    });
+    const embed = lastPayload().embeds[0];
+    const total =
+      embed.title.length +
+      embed.description.length +
+      embed.fields.reduce(
+        (n: number, f: { name: string; value: string }) =>
+          n + f.name.length + f.value.length,
+        0,
+      );
+    expect(total).toBeLessThanOrEqual(6000);
+  });
+
+  it("bounds the webhook POST with a timeout signal", async () => {
+    await enabledNotifier().notify({ kind: "repair_started", job: jobRef() });
+    const calls = fetchMock.mock.calls;
+    const init = calls[calls.length - 1][1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
 });
 
 describe("JobQueue Discord wiring", () => {
