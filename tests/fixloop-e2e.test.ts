@@ -78,6 +78,38 @@ describe("sanitizeForPr", () => {
     expect(sanitizeForPr(input)).toContain("Bearer [REDACTED]");
   });
 
+  it("redacts JWTs whose signature ends with a non-word character", () => {
+    // Regression: the trailing \b after the secret-prefix alternation
+    // failed when a base64url JWT segment ended with "-" or "_" (both
+    // non-word chars), so the whole rule was skipped and the raw JWT
+    // leaked.
+    const header = "eyJ" + "hbGciOiJIUzI1NiJ9";
+    const payload = "eyJzdWIiOiIxMjM0NTY3ODkw";
+    const sig = "abcdefghi" + "-"; // 9 word chars + trailing dash
+    const input = `saw jwt ${header}.${payload}.${sig} in logs`;
+    const out = sanitizeForPr(input);
+    expect(out).not.toContain(header);
+    expect(out).not.toContain(sig);
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("redacts quoted multi-word secret values in full", () => {
+    // The old value pattern stopped at whitespace even inside quotes, so
+    // password="hunter2 admin" leaked `admin`.
+    const secret = "hunter2" + " admin";
+    const input = `login failed: password="${secret}" for user bob`;
+    const out = sanitizeForPr(input);
+    expect(out).not.toContain("hunter2");
+    expect(out).not.toContain("admin");
+    expect(out).toContain('password="[REDACTED]"');
+  });
+
+  it("redacts unterminated quoted values", () => {
+    // A missing closing quote must not let the value slip through.
+    const input = 'truncated dump: password="hunter2';
+    const out = sanitizeForPr(input);
+    expect(out).not.toContain("hunter2");
+  });
   it("redacts Bearer tokens ending in a non-word character", () => {
     // Regression: the trailing \b after [a-zA-Z0-9._-]{10,} failed when
     // the token ended with "." or "-" (non-word chars), so the whole rule

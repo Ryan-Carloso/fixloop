@@ -14,20 +14,36 @@ export function sanitizeForPr(text: string): string {
     text
       // API keys, tokens, secrets (common prefixes). Includes modern
       // formats: fine-grained GitHub PATs, GitHub app/user/refresh
-      // tokens, GitLab and npm tokens, JWTs.
+      // tokens, GitLab and npm tokens, JWTs. No trailing word boundary:
+      // base64url JWT segments can end with "-" or "_" (non-word chars),
+      // and a trailing \b would fail there and skip the whole rule,
+      // leaking the token. The character classes already exclude
+      // whitespace and quotes, so no boundary is needed.
       .replace(
-        /\b(sk-[a-zA-Z0-9_-]{10,}|ghp_[a-zA-Z0-9]{10,}|gho_[a-zA-Z0-9]{10,}|gh[sur]_[a-zA-Z0-9]{10,}|github_pat_[A-Za-z0-9_]{20,}|xox[bap]-[a-zA-Z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/g,
+        /\b(sk-[a-zA-Z0-9_-]{10,}|ghp_[a-zA-Z0-9]{10,}|gho_[a-zA-Z0-9]{10,}|gh[sur]_[a-zA-Z0-9]{10,}|github_pat_[A-Za-z0-9_]{20,}|xox[bap]-[a-zA-Z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})/g,
         "[REDACTED]",
       )
       // Generic key=value with secret-like keys. The keyword may sit
       // inside a compound name (client_secret, access_token, api_key_id:
       // no word boundary before the keyword there), so match the full key
-      // around it. Quotes and the separator are captured and re-emitted so
-      // JSON-like text keeps its structure ({"password":"hunter2"} ->
+      // around it. A quoted value is consumed whole — including inner
+      // spaces — so password="hunter2 admin" redacts fully instead of
+      // leaking `admin`. The original quoting is preserved so JSON-like
+      // text keeps its structure ({"password":"hunter2"} ->
       // {"password":"[REDACTED]"} instead of {"password=[REDACTED]}).
+      // The unquoted branch still accepts stray quotes so an unterminated
+      // password="abc never slips through (the quoted branches are tried
+      // first, so balanced quotes always win).
       .replace(
-        /\b([\w.-]*(?:api[_-]?key|token|secret|password|passwd|pwd)[\w.-]*)\s*(['"]?)\s*([:=])\s*(['"]?)([^\s,;}\]'"]+)(['"]?)/gi,
-        "$1$2$3$4[REDACTED]$6",
+        /\b([\w.-]*(?:api[_-]?key|token|secret|password|passwd|pwd)[\w.-]*)\s*(['"]?)\s*([:=])\s*("[^"]*"|'[^']*'|[^\s,;\}]+)/gi,
+        (_match, key: string, quote: string, sep: string, value: string) => {
+          const q = value.startsWith('"')
+            ? '"'
+            : value.startsWith("'")
+              ? "'"
+              : quote;
+          return `${key}${quote}${sep}${q}[REDACTED]${q}`;
+        },
       )
       // Bearer tokens: the character class includes "." and "-" (both
       // non-word characters), so a trailing \b would fail to match when
