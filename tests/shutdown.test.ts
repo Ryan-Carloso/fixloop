@@ -161,6 +161,61 @@ describe("registerShutdown", () => {
     expect(exitCode).toBe(0);
   });
 
+  it("logs the error when close() rejects", async () => {
+    // A degraded shutdown (lost write-behind transitions) must leave a
+    // trace: swallowing it silently while exiting 0 hides data loss.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const close = vi.fn(async () => {
+        throw new Error("pool exploded");
+      });
+      const handlers = new Map<string, () => void>();
+      registerShutdown(
+        { close },
+        {
+          onSignal: (signal, handler) => {
+            handlers.set(signal, handler);
+          },
+          exit: () => {},
+        },
+      );
+      handlers.get("SIGTERM")!();
+      await new Promise((r) => setTimeout(r, 10));
+      expect(close).toHaveBeenCalledTimes(1);
+      const logged = error.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("pool exploded");
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("logs the error when beforeClose rejects", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const close = vi.fn(async () => {});
+      const handlers = new Map<string, () => void>();
+      registerShutdown(
+        { close },
+        {
+          onSignal: (signal, handler) => {
+            handlers.set(signal, handler);
+          },
+          exit: () => {},
+          beforeClose: () => {
+            throw new Error("server already closed");
+          },
+        },
+      );
+      handlers.get("SIGTERM")!();
+      await new Promise((r) => setTimeout(r, 10));
+      expect(close).toHaveBeenCalledTimes(1);
+      const logged = error.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("server already closed");
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it("clears the beforeClose timeout once the race settles", async () => {
     // Without the clear, the bound timer keeps the event loop alive for
     // the full timeout even after beforeClose finished fast (matters in

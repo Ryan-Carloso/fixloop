@@ -221,74 +221,75 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
     { config: { allowQueryToken: true } },
     async (req, reply) => {
 
-    try {
-      const ctx = await bugsink.parse(req.body);
-      const repo = findRepository(config, ctx.project);
-      if (!repo) {
+      try {
+        const ctx = await bugsink.parse(req.body);
+        const repo = findRepository(config, ctx.project);
+        if (!repo) {
+          req.log.info(
+            { issueId: ctx.issueId, project: ctx.project },
+            "event received but no repository mapping; not queued",
+          );
+          return reply.status(202).send({
+            received: true,
+            queued: false,
+            reason: `no repository mapping for project '${ctx.project ?? "unknown"}'`,
+          });
+        }
+
+        const now = new Date().toISOString();
+        const job: Job = {
+          id: newJobId(),
+          dedupKey: dedupKey(ctx.provider, repo.key, ctx.issueId),
+          provider: ctx.provider,
+          repository: repo.key,
+          issueId: ctx.issueId,
+          status: "QUEUED",
+          errorContext: ctx,
+          createdAt: now,
+          updatedAt: now,
+        };
+        const result = queue.enqueue(job);
+        if (!result.accepted && !result.deduped) {
+          // The queue is quiescing for shutdown: the job is persisted and
+          // crash recovery will mark it interrupted on the next boot, but
+          // no repair starts in this process. 503 (not a silent 202) tells
+          // the sender to retry.
+          return reply.status(503).send({
+            received: true,
+            provider: ctx.provider,
+            issueId: ctx.issueId,
+            project: ctx.project,
+            queued: false,
+            reason: "server is shutting down",
+          });
+        }
         req.log.info(
-          { issueId: ctx.issueId, project: ctx.project },
-          "event received but no repository mapping; not queued",
+          {
+            jobId: result.job.id,
+            dedupKey: job.dedupKey,
+            queued: result.accepted,
+            deduped: result.deduped,
+          },
+          "job enqueued",
         );
         return reply.status(202).send({
-          received: true,
-          queued: false,
-          reason: `no repository mapping for project '${ctx.project ?? "unknown"}'`,
-        });
-      }
-
-      const now = new Date().toISOString();
-      const job: Job = {
-        id: newJobId(),
-        dedupKey: dedupKey(ctx.provider, repo.key, ctx.issueId),
-        provider: ctx.provider,
-        repository: repo.key,
-        issueId: ctx.issueId,
-        status: "QUEUED",
-        errorContext: ctx,
-        createdAt: now,
-        updatedAt: now,
-      };
-      const result = queue.enqueue(job);
-      if (!result.accepted && !result.deduped) {
-        // The queue is quiescing for shutdown: the job is persisted and
-        // crash recovery will mark it interrupted on the next boot, but
-        // no repair starts in this process. 503 (not a silent 202) tells
-        // the sender to retry.
-        return reply.status(503).send({
           received: true,
           provider: ctx.provider,
           issueId: ctx.issueId,
           project: ctx.project,
-          queued: false,
-          reason: "server is shutting down",
-        });
-      }
-      req.log.info(
-        {
-          jobId: result.job.id,
-          dedupKey: job.dedupKey,
           queued: result.accepted,
           deduped: result.deduped,
-        },
-        "job enqueued",
-      );
-      return reply.status(202).send({
-        received: true,
-        provider: ctx.provider,
-        issueId: ctx.issueId,
-        project: ctx.project,
-        queued: result.accepted,
-        deduped: result.deduped,
-        jobId: result.job.id,
-        status: result.job.status,
-      });
-    } catch (err) {
-      if (err instanceof ErrorParseError) {
-        return reply.status(400).send({ error: err.message });
+          jobId: result.job.id,
+          status: result.job.status,
+        });
+      } catch (err) {
+        if (err instanceof ErrorParseError) {
+          return reply.status(400).send({ error: err.message });
+        }
+        throw err;
       }
-      throw err;
-    }
-  });
+    },
+  );
 
   return app;
 }
@@ -346,8 +347,13 @@ export function registerShutdown(
             timer = setTimeout(resolve, beforeCloseTimeoutMs);
           }),
         ]);
-      } catch {
-        // Non-fatal: the flush must still run.
+      } catch (err) {
+        // Non-fatal: the flush must still run. But log it: a degraded
+        // shutdown (e.g. the HTTP server failed to stop cleanly) must
+        // leave a trace so operators can tell it apart from a clean one.
+        console.error(
+          `error during shutdown beforeClose: ${err instanceof Error ? err.message : String(err)}`,
+        );
       } finally {
         // Clear the bound timer once the race settles: without this it
         // keeps the event loop alive for the full timeout even after
@@ -356,7 +362,15 @@ export function registerShutdown(
       }
       await store.close();
     })()
-      .catch(() => {})
+      .catch((err) => {
+        // Log the failure (e.g. the Postgres flush could not reach the
+        // database and write-behind transitions were lost) but still exit
+        // 0: the exit code is pinned by contract (see the tests), and the
+        // log line is what lets orchestration detect a degraded shutdown.
+        console.error(
+          `error during shutdown: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      })
       .finally(() => exit(0));
   };
   onSignal("SIGTERM", shutdown);
