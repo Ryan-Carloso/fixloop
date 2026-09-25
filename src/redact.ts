@@ -17,9 +17,11 @@ export function sanitizeForPr(text: string): string {
         /\b(sk-[a-zA-Z0-9_-]{10,}|ghp_[a-zA-Z0-9]{10,}|gho_[a-zA-Z0-9]{10,}|xox[bap]-[a-zA-Z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g,
         "[REDACTED]",
       )
-      // Generic key=value with secret-like keys.
+      // Generic key=value with secret-like keys. Tolerates JSON-style
+      // quoting around the key and the separator ({"password":"..."}),
+      // which error text echoing HTTP bodies commonly carries.
       .replace(
-        /\b(api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*['"]?[^'"\s,;]+['"]?/gi,
+        /\b(api[_-]?key|token|secret|password|passwd|pwd)\s*['"]?\s*[:=]\s*['"]?\s*[^'"\s,;]+['"]?/gi,
         "$1=[REDACTED]",
       )
       // Bearer tokens.

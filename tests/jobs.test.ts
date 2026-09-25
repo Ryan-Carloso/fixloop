@@ -319,6 +319,27 @@ describe("JobQueue.stop", () => {
     expect(store.get(job.id)?.status).toBe("PR_CREATED");
   });
 
+  it("logs the sanitized error when the FAILED transition is ignored after a terminal state", async () => {
+    const store = new JobStore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const handler: JobHandler = async (_job, update) => {
+        update("PR_CREATED", { prUrl: "https://example.com/pr/1" });
+        throw new Error("post-pr boom: password=hunter2");
+      };
+      const queue = new JobQueue(store, handler);
+      queue.enqueue(makeJob("term-1"));
+      await tick(50);
+      expect(store.get("job-term-1")?.status).toBe("PR_CREATED");
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).toContain("ignoring transition");
+      expect(warnings).toContain("post-pr boom: password=[REDACTED]");
+      expect(warnings).not.toContain("hunter2");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("prevents new repairs from starting after stop()", async () => {
     const store = new JobStore();
     let release!: () => void;

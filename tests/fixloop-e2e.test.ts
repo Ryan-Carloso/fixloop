@@ -98,6 +98,14 @@ describe("sanitizeForPr", () => {
     expect(redacted).toContain("redis://:[REDACTED]@cache:6379/0");
   });
 
+  it("redacts JSON-quoted secrets", () => {
+    const input =
+      'request failed with body {"password":"hunter2","api_key": "sk-live-abc123"}';
+    const redacted = sanitizeForPr(input);
+    expect(redacted).not.toContain("hunter2");
+    expect(redacted).not.toContain("sk-live-abc123");
+  });
+
   it("leaves credential-less URLs intact", () => {
     const input = "GET https://discord.com/api/webhooks/123/abc returned 200";
     expect(sanitizeForPr(input)).toBe(input);

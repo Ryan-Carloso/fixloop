@@ -107,9 +107,16 @@ export class JobStore {
     if (TERMINAL_STATUSES.has(job.status)) {
       // Late transition out of a terminal state: ignore it (see
       // TERMINAL_STATUSES). Returning undefined keeps the caller's
-      // no-change path (no notification, no write-behind).
+      // no-change path (no notification, no write-behind). Include the
+      // note when present: a handler that throws after reaching a
+      // terminal state would otherwise lose its error entirely. Notes
+      // are sanitized at capture (JobQueue.runOne), so this is safe to log.
+      const note =
+        typeof patch?.note === "string" && patch.note.length > 0
+          ? `: ${patch.note}`
+          : "";
       console.warn(
-        `ignoring transition of job ${id} from terminal status ${job.status} to ${status}`,
+        `ignoring transition of job ${id} from terminal status ${job.status} to ${status}${note}`,
       );
       return undefined;
     }

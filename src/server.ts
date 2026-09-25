@@ -82,7 +82,10 @@ function checkAuth(
 ): AuthCheck {
   const secret = deps.webhookSecret ?? process.env.FIXLOOP_WEBHOOK_SECRET ?? "";
   if (!secret) {
-    return { ok: false, status: 500, error: "webhook secret not configured" };
+    // Fail closed, but don't disclose the misconfiguration to
+    // unauthenticated callers — the detail stays in the server logs.
+    console.warn("request rejected: webhook secret not configured");
+    return { ok: false, status: 500, error: "server misconfigured" };
   }
   const headerToken = req.headers["x-fixloop-webhook-token"];
   const queryToken = (req.query as { token?: unknown }).token;

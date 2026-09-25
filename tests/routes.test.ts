@@ -152,10 +152,10 @@ describe("webhook -> queue integration", () => {
       const app = buildServer({ config });
       const list = await app.inject({ method: "GET", url: "/jobs" });
       expect(list.statusCode).toBe(500);
-      expect(list.json()).toEqual({ error: "webhook secret not configured" });
+      expect(list.json()).toEqual({ error: "server misconfigured" });
       const one = await app.inject({ method: "GET", url: "/jobs/abc" });
       expect(one.statusCode).toBe(500);
-      expect(one.json()).toEqual({ error: "webhook secret not configured" });
+      expect(one.json()).toEqual({ error: "server misconfigured" });
     } finally {
       if (previous === undefined) {
         delete process.env.FIXLOOP_WEBHOOK_SECRET;
@@ -209,7 +209,8 @@ describe("webhook -> queue integration", () => {
   });
 });
 
-describe("default Discord notifier wiring", () => {  it("notifies through DiscordNotifier.fromEnv() in the default queue", async () => {
+describe("default Discord notifier wiring", () => {
+  it("notifies through DiscordNotifier.fromEnv() in the default queue", async () => {
     const url = "https://discord.com/api/webhooks/123/serverwiring";
     const previousWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
     process.env.DISCORD_WEBHOOK_URL = url;
