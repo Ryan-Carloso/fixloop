@@ -67,8 +67,10 @@ jobs:
 
       - name: Check for z.ai API key
         id: check
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
         run: |
-          if [ -z "${{ secrets.ZAI_API_KEY }}" ]; then
+          if [ -z "${ZAI_API_KEY}" ]; then
             echo "has_key=false" >> "$GITHUB_OUTPUT"
             echo "ZAI_API_KEY secret is not set — skipping OpenCode review."
           else
@@ -137,10 +139,14 @@ jobs:
         if: steps.check.outputs.has_key == 'true'
         env:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          cat > prompt.md <<'EOF'
-          You are reviewing GitHub pull request #${{ github.event.pull_request.number }}: "${{ github.event.pull_request.title }}".
+          # PR title is untrusted input: pass it through env and printf %s so
+          # it can never break out of the quoted heredoc below (script injection).
+          printf 'You are reviewing GitHub pull request #%s: "%s".\n' "$PR_NUMBER" "$PR_TITLE" > prompt.md
+          cat >> prompt.md <<'EOF'
           A unified diff of the PR is attached to this message.
 
           Rules:
