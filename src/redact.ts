@@ -12,9 +12,10 @@
 export function sanitizeForPr(text: string): string {
   return (
     text
-      // API keys, tokens, secrets (common prefixes).
+      // API keys, tokens, secrets (common prefixes). Includes modern
+      // formats: fine-grained GitHub PATs, GitLab and npm tokens, JWTs.
       .replace(
-        /\b(sk-[a-zA-Z0-9_-]{10,}|ghp_[a-zA-Z0-9]{10,}|gho_[a-zA-Z0-9]{10,}|xox[bap]-[a-zA-Z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g,
+        /\b(sk-[a-zA-Z0-9_-]{10,}|ghp_[a-zA-Z0-9]{10,}|gho_[a-zA-Z0-9]{10,}|github_pat_[A-Za-z0-9_]{20,}|xox[bap]-[a-zA-Z0-9-]{10,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/g,
         "[REDACTED]",
       )
       // Generic key=value with secret-like keys. Tolerates JSON-style

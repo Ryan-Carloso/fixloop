@@ -114,6 +114,20 @@ describe("sanitizeForPr", () => {
     expect(redacted).toContain("/webhooks/[redacted]");
   });
 
+  it("redacts modern token formats and JWTs", () => {
+    const input = [
+      "github_pat_abcdefghij1234567890ABCDEFGH",
+      "glpat-x1234567890abcdefghi",
+      "npm_abc123def456ghi789jkl012mno345pqr",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+    ].join(" ");
+    const redacted = sanitizeForPr(input);
+    expect(redacted).not.toContain("github_pat_");
+    expect(redacted).not.toContain("glpat-");
+    expect(redacted).not.toContain("npm_abc123");
+    expect(redacted).not.toContain("eyJhbGci");
+  });
+
   it("leaves credential-less URLs intact", () => {
     // A bare /webhooks/<id> (single segment) carries no token.
     const input = "GET https://discord.com/api/webhooks/12345 returned 200";

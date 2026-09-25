@@ -733,3 +733,51 @@ describe("PostgresJobStore.connect pool cleanup", () => {
     expect(end).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("PostgresJobStore shutdown observability", () => {
+  it("warns when the shutdown flush times out with writes pending", async () => {
+    const query = vi.fn(async (text: string) => {
+      if (
+        text.includes("SELECT 1") ||
+        text.includes("CREATE TABLE") ||
+        text.includes("FROM fixloop_jobs")
+      ) {
+        return { rows: [] as Record<string, unknown>[] };
+      }
+      return new Promise<never>(() => {}); // UPSERT hangs: flush() never drains
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const store = await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        { query } as DbClient,
+      );
+      store.create(makeJob());
+      await store.close(20);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("timed out"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("logs a summary of skipped corrupt rows during hydration", async () => {
+    const { client, rowsQueue } = mockDb();
+    rowsQueue.push([
+      { id: "bad-1", status: "BOGUS", error_context: {} },
+      { id: "bad-2", status: "QUEUED", error_context: "not-an-object" },
+    ]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        client,
+      );
+      const messages = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(messages).toContain("skipped 2 corrupt row(s)");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

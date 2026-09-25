@@ -216,6 +216,7 @@ export class PostgresJobStore extends JobStore {
 
   private async hydrate(): Promise<void> {
     const { rows } = await this.db.query(SELECT_ALL);
+    let skipped = 0;
     for (const row of rows) {
       if (!isJobStatus(row.status)) {
         // Corrupt/hand-edited row: never let an invalid status into the
@@ -223,6 +224,7 @@ export class PostgresJobStore extends JobStore {
         console.warn(
           `Postgres job store: skipping row ${String(row.id)} with invalid status ${String(row.status)}.`,
         );
+        skipped++;
         continue;
       }
       const parsedContext = errorContextSchema.safeParse(row.error_context);
@@ -232,6 +234,7 @@ export class PostgresJobStore extends JobStore {
         console.warn(
           `Postgres job store: skipping row ${String(row.id)} with invalid error_context.`,
         );
+        skipped++;
         continue;
       }
       const job = rowToJob(row, row.status, parsedContext.data);
@@ -245,6 +248,15 @@ export class PostgresJobStore extends JobStore {
         // goes through the write-behind so the DB row is fixed as well.
         this.updateStatus(job.id, "FAILED", { note: RESTART_NOTE });
       }
+    }
+    if (skipped > 0) {
+      // One summary line: skipped rows stay skipped on every boot, so the
+      // operator gets a count instead of only the per-row warnings above.
+      // Inspect with SELECT id, status FROM fixloop_jobs; remove bad rows
+      // with DELETE FROM fixloop_jobs WHERE id = '<id>';
+      console.warn(
+        `Postgres job store: skipped ${skipped} corrupt row(s) during hydration; they are invisible to the API until removed.`,
+      );
     }
   }
 
@@ -314,12 +326,22 @@ export class PostgresJobStore extends JobStore {
    * Flushes pending writes, then closes the underlying database pool.
    * The flush is raced against a timeout so a black-holed connection can
    * never hang shutdown forever. Never throws — safe to call on the way out.
+   * A timed-out flush is logged: transitions still in flight at that point
+   * never reach the pool, and silent data loss is worse than a noisy log.
    */
   async close(timeoutMs = SHUTDOWN_FLUSH_TIMEOUT_MS): Promise<void> {
-    await Promise.race([
-      this.flush(),
-      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    const flushed = await Promise.race([
+      this.flush().then(() => true),
+      new Promise<boolean>((resolve) =>
+        setTimeout(() => resolve(false), timeoutMs),
+      ),
     ]);
+    if (!flushed) {
+      console.warn(
+        `Postgres job store: shutdown flush timed out after ${timeoutMs}ms ` +
+          `with ${this.persistChains.size} write(s) still pending; they were dropped.`,
+      );
+    }
     await this.db.end?.().catch(() => {});
   }
 }
