@@ -319,7 +319,7 @@ describe("PostgresJobStore persistence", () => {
     queries.length = 0;
     const job = makeJob({ note: "hello" });
     const created = store.create(job);
-    await flushWriteBehind();
+    await vi.waitFor(() => expect(queries).toHaveLength(1));
 
     expect(created).toBe(job);
     expect(store.get(job.id)).toBe(job);
@@ -351,13 +351,13 @@ describe("PostgresJobStore persistence", () => {
     );
     const job = makeJob();
     store.create(job);
-    await flushWriteBehind();
+    await vi.waitFor(() => expect(queries.length).toBeGreaterThan(0));
     queries.length = 0;
 
     const updated = store.updateStatus(job.id, "PR_CREATED", {
       prUrl: "https://github.com/o/r/pull/7",
     });
-    await flushWriteBehind();
+    await vi.waitFor(() => expect(queries).toHaveLength(1));
 
     expect(updated?.status).toBe("PR_CREATED");
     expect(updated?.prUrl).toBe("https://github.com/o/r/pull/7");
@@ -434,7 +434,14 @@ describe("PostgresJobStore persistence", () => {
       { query },
     );
     store.create(makeJob());
-    await flushWriteBehind(); // let the write reach the gate
+    // Wait until the write has reached the gate (the INSERT is dispatched
+    // but blocked), instead of guessing with a fixed sleep.
+    await vi.waitFor(() =>
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining("INSERT INTO fixloop_jobs"),
+        expect.anything(),
+      ),
+    );
 
     let flushed = false;
     const flushing = store.flush().then(() => {
@@ -522,7 +529,14 @@ describe("PostgresJobStore persistence", () => {
       { query, end },
     );
     store.create(makeJob());
-    await flushWriteBehind(); // let the write reach the gate
+    // Wait until the write has reached the gate (the INSERT is dispatched
+    // but blocked), instead of guessing with a fixed sleep.
+    await vi.waitFor(() =>
+      expect(query).toHaveBeenCalledWith(
+        expect.stringContaining("INSERT INTO fixloop_jobs"),
+        expect.anything(),
+      ),
+    );
 
     // The write never commits; close() must still resolve via its timeout
     // and end the pool instead of hanging shutdown.
@@ -565,18 +579,20 @@ describe("PostgresJobStore persistence", () => {
       "postgres://localhost:5432/fixloop",
       client,
     );
-    await flushWriteBehind();
-
+    // The in-memory correction is applied during the awaited hydrate, while
+    // the write-back is fire-and-forget: wait for it to land instead of
+    // guessing with a fixed sleep.
     expect(store.get(orphaned.id)).toMatchObject({
       status: "FAILED",
       note: "interrupted by server restart",
     });
     expect(store.findActiveByDedupKey(key)).toBeUndefined();
-    // The correction is written back to Postgres, not just the Map.
-    const correction = queries.find(
-      (q) => q.params?.[0] === orphaned.id && q.params?.[5] === "FAILED",
-    );
-    expect(correction?.text).toContain("ON CONFLICT (id) DO UPDATE");
+    await vi.waitFor(() => {
+      const correction = queries.find(
+        (q) => q.params?.[0] === orphaned.id && q.params?.[5] === "FAILED",
+      );
+      expect(correction?.text).toContain("ON CONFLICT (id) DO UPDATE");
+    });
   });
 
   it("keeps PR_CREATED rows blocking dedup across restarts", async () => {
@@ -761,7 +777,8 @@ describe("PostgresJobStore shutdown observability", () => {
       if (
         text.includes("SELECT 1") ||
         text.includes("CREATE TABLE") ||
-        text.includes("FROM fixloop_jobs")
+        text.includes("FROM fixloop_jobs") ||
+        text.includes("information_schema.columns") // schema-drift guard
       ) {
         return { rows: [] as Record<string, unknown>[] };
       }
@@ -1076,5 +1093,51 @@ describe("PostgresJobStore hydration window", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("PostgresJobStore schema drift guard", () => {
+  // The id column changed from UUID to TEXT during development;
+  // CREATE TABLE IF NOT EXISTS never migrates an existing table, and
+  // write-behind persistence is warn-only, so a stale table would fail
+  // every insert almost silently. Boot must fail fast instead.
+  function dbWithIdType(dataType: string): DbClient {
+    const { client, query } = mockDb();
+    return {
+      query: async (text: string, params?: unknown[]) => {
+        if (text.includes("information_schema.columns")) {
+          return { rows: [{ data_type: dataType }] };
+        }
+        return query(text, params);
+      },
+    };
+  }
+
+  it("fails fast when the existing table has the old UUID id column", async () => {
+    await expect(
+      PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        dbWithIdType("uuid"),
+      ),
+    ).rejects.toThrow(/outdated schema|recreate/i);
+  });
+
+  it("boots normally when the id column is text", async () => {
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      dbWithIdType("text"),
+    );
+    expect(store).toBeInstanceOf(PostgresJobStore);
+    await store.close();
+  });
+
+  it("boots normally when the table is fresh (no information_schema row)", async () => {
+    const { client } = mockDb();
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    expect(store).toBeInstanceOf(PostgresJobStore);
+    await store.close();
   });
 });

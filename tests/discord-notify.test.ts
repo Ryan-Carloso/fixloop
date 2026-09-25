@@ -387,10 +387,12 @@ describe("JobQueue Discord wiring", () => {
       notifier,
     );
     queue.enqueue(makeJob("7"));
-    await tick(100);
-
-    const kinds = notifier.events.map((e) => e.kind);
-    expect(kinds).toEqual(["repair_started", "pr_created"]);
+    await vi.waitFor(() => {
+      expect(notifier.events.map((e) => e.kind)).toEqual([
+        "repair_started",
+        "pr_created",
+      ]);
+    });
     const prEvent = notifier.events[1];
     expect(prEvent.kind).toBe("pr_created");
     if (prEvent.kind === "pr_created") {
@@ -411,10 +413,12 @@ describe("JobQueue Discord wiring", () => {
       notifier,
     );
     queue.enqueue(makeJob("8"));
-    await tick(100);
-
-    const kinds = notifier.events.map((e) => e.kind);
-    expect(kinds).toEqual(["repair_started", "repair_failed"]);
+    await vi.waitFor(() => {
+      expect(notifier.events.map((e) => e.kind)).toEqual([
+        "repair_started",
+        "repair_failed",
+      ]);
+    });
     const failEvent = notifier.events[1];
     expect(failEvent.kind).toBe("repair_failed");
     if (failEvent.kind === "repair_failed") {
@@ -434,10 +438,12 @@ describe("JobQueue Discord wiring", () => {
       notifier,
     );
     queue.enqueue(makeJob("9"));
-    await tick(100);
-
-    const kinds = notifier.events.map((e) => e.kind);
-    expect(kinds).toEqual(["repair_started", "needs_review"]);
+    await vi.waitFor(() => {
+      expect(notifier.events.map((e) => e.kind)).toEqual([
+        "repair_started",
+        "needs_review",
+      ]);
+    });
   });
 
   it("sends no notifications without a notifier", async () => {
@@ -447,8 +453,9 @@ describe("JobQueue Discord wiring", () => {
     });
     // Must not throw even though a PR was "created".
     queue.enqueue(makeJob("10"));
-    await tick(100);
-    expect(store.get("job-10")?.status).toBe("PR_CREATED");
+    await vi.waitFor(() => {
+      expect(store.get("job-10")?.status).toBe("PR_CREATED");
+    });
   });
 
   it("survives a custom notifier that rejects, with no unhandled rejection", async () => {
@@ -473,8 +480,9 @@ describe("JobQueue Discord wiring", () => {
         rejectingNotifier,
       );
       queue.enqueue(makeJob("reject1"));
-      await tick(150);
-      expect(store.get("job-reject1")?.status).toBe("PR_CREATED");
+      await vi.waitFor(() => {
+        expect(store.get("job-reject1")?.status).toBe("PR_CREATED");
+      });
       // Give the rejected promise a chance to surface as unhandled.
       await tick(50);
       expect(rejections).toHaveLength(0);
@@ -505,8 +513,9 @@ describe("JobQueue Discord wiring", () => {
         throwingNotifier,
       );
       queue.enqueue(makeJob("throw1"));
-      await tick(150);
-      expect(store.get("job-throw1")?.status).toBe("PR_CREATED");
+      await vi.waitFor(() => {
+        expect(store.get("job-throw1")?.status).toBe("PR_CREATED");
+      });
       await tick(50);
       expect(rejections).toHaveLength(0);
     } finally {
@@ -526,10 +535,12 @@ describe("JobQueue Discord wiring", () => {
       notifier,
     );
     queue.enqueue(makeJob("timeout1"));
-    await tick(100);
-
-    const kinds = notifier.events.map((e) => e.kind);
-    expect(kinds).toEqual(["repair_started", "repair_failed"]);
+    await vi.waitFor(() => {
+      expect(notifier.events.map((e) => e.kind)).toEqual([
+        "repair_started",
+        "repair_failed",
+      ]);
+    });
     const failEvent = notifier.events[1];
     expect(failEvent.kind).toBe("repair_failed");
     if (failEvent.kind === "repair_failed") {

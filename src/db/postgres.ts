@@ -328,6 +328,7 @@ export class PostgresJobStore extends JobStore {
     const store = new PostgresJobStore(client, releaseLock);
     try {
       await client.query(loadSchemaSql());
+      await store.assertNoSchemaDrift(client);
       if (pool) {
         // Single-instance guard: crash recovery rewrites every transient
         // row on boot, so two processes sharing one DATABASE_URL corrupt
@@ -358,6 +359,32 @@ export class PostgresJobStore extends JobStore {
       throw err;
     }
     return store;
+  }
+
+  /**
+   * Fail fast when the existing table was created from an outdated schema.
+   * The id column changed from UUID to TEXT during development, and
+   * CREATE TABLE IF NOT EXISTS never migrates an existing table — without
+   * this guard every insert would fail, and write-behind persistence is
+   * warn-only, so the store would keep serving jobs from memory with only
+   * a per-write warning as the signal.
+   */
+  private async assertNoSchemaDrift(client: DbClient): Promise<void> {
+    const { rows } = await client.query(
+      `SELECT data_type FROM information_schema.columns
+       WHERE table_name = 'fixloop_jobs' AND column_name = 'id'`,
+    );
+    const dataType = rows[0]?.data_type;
+    // No row: fresh table, the schema above just created it.
+    if (dataType === undefined) return;
+    if (dataType !== "text" && dataType !== "character varying") {
+      throw new Error(
+        `FixLoop: the fixloop_jobs table was created with an outdated schema ` +
+          `(id is ${String(dataType)}, expected text). Recreate it — ` +
+          `DROP TABLE fixloop_jobs; — and the current schema is applied ` +
+          `automatically on the next boot.`,
+      );
+    }
   }
 
   private async hydrate(notifier?: JobNotifier): Promise<void> {

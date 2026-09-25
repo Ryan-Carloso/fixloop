@@ -75,7 +75,6 @@ describe("JobStore", () => {
     const store = new JobStore();
     const job = makeJob("1");
     store.create(job);
-    await tick(2);
     store.updateStatus("job-1", "RUNNING");
     const updated = store.get("job-1")!;
     expect(updated.status).toBe("RUNNING");
@@ -114,8 +113,9 @@ describe("JobQueue", () => {
     expect(res.deduped).toBe(false);
     expect(res.job.id).toBe("job-1");
     // The in-process worker picks the job up synchronously on enqueue.
-    await tick();
-    expect(store.get("job-1")!.status).toBe("RUNNING");
+    await vi.waitFor(() => {
+      expect(store.get("job-1")!.status).toBe("RUNNING");
+    });
   });
 
   it("deduplicates while an active job exists for the same key", async () => {
@@ -169,9 +169,10 @@ describe("JobQueue", () => {
       };
       const queue = new JobQueue(store, handler, 1, notifier);
       queue.enqueue(makeJob("9"));
-      await tick(50);
+      await vi.waitFor(() => {
+        expect(store.get("job-9")!.status).toBe("PR_CREATED");
+      });
       const job = store.get("job-9")!;
-      expect(job.status).toBe("PR_CREATED");
       expect(job.prUrl).toBe("https://github.com/o/r/pull/1");
       // Exactly one pr_created notification; the late FAILED is ignored,
       // so no contradictory repair_failed goes out.
@@ -203,28 +204,32 @@ describe("JobQueue", () => {
     queue.enqueue(makeJob("1"));
     queue.enqueue(makeJob("2"));
     queue.enqueue(makeJob("3"));
-    await tick(50);
-
     // Only the first job runs; the others wait.
-    expect(events).toEqual(["start:job-1"]);
+    await vi.waitFor(() => {
+      expect(events).toEqual(["start:job-1"]);
+    });
     expect(maxConcurrent).toBe(1);
 
     resolvers.get("job-1")!();
-    await tick(50);
-    expect(events).toEqual(["start:job-1", "end:job-1", "start:job-2"]);
+    await vi.waitFor(() => {
+      expect(events).toEqual(["start:job-1", "end:job-1", "start:job-2"]);
+    });
 
     resolvers.get("job-2")!();
-    await tick(50);
+    await vi.waitFor(() => {
+      expect(events).toContain("start:job-3");
+    });
     resolvers.get("job-3")!();
-    await tick(50);
-    expect(events).toEqual([
-      "start:job-1",
-      "end:job-1",
+    await vi.waitFor(() => {
+      expect(events).toEqual([
+        "start:job-1",
+        "end:job-1",
       "start:job-2",
       "end:job-2",
       "start:job-3",
       "end:job-3",
     ]);
+    });
     expect(maxConcurrent).toBe(1);
   });
 
@@ -238,8 +243,10 @@ describe("JobQueue", () => {
     const queue = new JobQueue(store, handler);
     queue.enqueue(makeJob("1"));
     queue.enqueue(makeJob("2"));
-    await tick(50);
-    expect(store.get("job-1")!.status).toBe("FAILED");
+    await vi.waitFor(() => {
+      expect(calls).toBe(2);
+      expect(store.get("job-1")!.status).toBe("FAILED");
+    });
     expect(store.get("job-1")!.note).toMatch(/boom/);
     expect(calls).toBe(2);
     expect(store.get("job-2")!.status).toBe("RUNNING");
@@ -252,8 +259,9 @@ describe("JobQueue", () => {
     };
     const queue = new JobQueue(store, handler);
     queue.enqueue(makeJob("9"));
-    await tick(50);
-    expect(store.get("job-9")!.status).toBe("FAILED");
+    await vi.waitFor(() => {
+      expect(store.get("job-9")!.status).toBe("FAILED");
+    });
     expect(store.get("job-9")!.note).toBe(
       "deploy failed: api_key=[REDACTED]",
     );
@@ -267,8 +275,9 @@ describe("JobQueue", () => {
     };
     const queue = new JobQueue(store, handler);
     queue.enqueue(makeJob("9"));
-    await tick(50);
-    expect(store.get("job-9")!.status).toBe("NEEDS_HUMAN_REVIEW");
+    await vi.waitFor(() => {
+      expect(store.get("job-9")!.status).toBe("NEEDS_HUMAN_REVIEW");
+    });
     expect(store.get("job-9")!.note).toBe("token=[REDACTED]");
     expect(store.get("job-9")!.note).not.toContain("supersecret456");
   });
@@ -305,7 +314,9 @@ describe("JobQueue.stop", () => {
     const queue = new JobQueue(store, handler);
     const job = makeJob("stop-1");
     queue.enqueue(job);
-    await tick();
+    await vi.waitFor(() => {
+      expect(store.get(job.id)?.status).toBe("RUNNING");
+    });
     let stopped = false;
     const stopping = queue.stop().then(() => {
       stopped = true;
@@ -329,8 +340,9 @@ describe("JobQueue.stop", () => {
       };
       const queue = new JobQueue(store, handler);
       queue.enqueue(makeJob("term-1"));
-      await tick(50);
-      expect(store.get("job-term-1")?.status).toBe("PR_CREATED");
+      await vi.waitFor(() => {
+        expect(store.get("job-term-1")?.status).toBe("PR_CREATED");
+      });
       const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
       expect(warnings).toContain("ignoring transition");
       expect(warnings).toContain("post-pr boom: password=[REDACTED]");
@@ -356,9 +368,10 @@ describe("JobQueue.stop", () => {
     const second = makeJob("stop-2b");
     queue.enqueue(first);
     queue.enqueue(second);
-    await tick();
+    await vi.waitFor(() => {
+      expect(started).toEqual([first.id]);
+    });
     const stopping = queue.stop();
-    await tick();
     release();
     await stopping;
     await tick(50);
@@ -441,7 +454,11 @@ describe("JobQueue notification hygiene", () => {
         leakyNotifier,
       );
       queue.enqueue(makeJob("leaky-1"));
-      await tick(50);
+      await vi.waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining("notification failed"),
+        );
+      });
       const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
       expect(warnings).toContain("notification failed");
       expect(warnings).not.toContain("ghp_abcdefghij1234567890");
@@ -470,8 +487,9 @@ describe("JobQueue notification hygiene", () => {
       notifier,
     );
     queue.enqueue(makeJob("dup-1"));
-    await tick(50);
-    expect(kinds.filter((k) => k === "repair_started")).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(kinds.filter((k) => k === "repair_started")).toHaveLength(1);
+    });
   });
 
   it("logs the error stack when a handler throws after a terminal state", async () => {
@@ -489,7 +507,11 @@ describe("JobQueue notification hygiene", () => {
       };
       const queue = new JobQueue(store, handler);
       queue.enqueue(makeJob("termstack-1"));
-      await tick(50);
+      await vi.waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining("at diagnosis-marker"),
+        );
+      });
       const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
       expect(warnings).toContain("at diagnosis-marker");
     } finally {
