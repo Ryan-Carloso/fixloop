@@ -52,6 +52,20 @@ export const ACTIVE_STATUSES: ReadonlySet<JobStatus> = new Set([
   "PR_CREATED",
 ]);
 
+/**
+ * Statuses a job never leaves. The pipeline is over; a late transition
+ * (e.g. a handler throwing after it already recorded PR_CREATED) is a
+ * bug, not an update. updateStatus ignores it and returns undefined, so
+ * no contradictory notification fires and dedup is never unblocked by
+ * accident.
+ */
+export const TERMINAL_STATUSES: ReadonlySet<JobStatus> = new Set([
+  "PR_CREATED",
+  "NEEDS_HUMAN_REVIEW",
+  "FAILED",
+  "TIMED_OUT",
+]);
+
 export function dedupKey(
   provider: string,
   repository: string,
@@ -90,6 +104,15 @@ export class JobStore {
   ): Job | undefined {
     const job = this.jobs.get(id);
     if (!job) return undefined;
+    if (TERMINAL_STATUSES.has(job.status)) {
+      // Late transition out of a terminal state: ignore it (see
+      // TERMINAL_STATUSES). Returning undefined keeps the caller's
+      // no-change path (no notification, no write-behind).
+      console.warn(
+        `ignoring transition of job ${id} from terminal status ${job.status} to ${status}`,
+      );
+      return undefined;
+    }
     job.status = status;
     job.updatedAt = new Date().toISOString();
     if (patch) Object.assign(job, patch);

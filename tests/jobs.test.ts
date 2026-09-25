@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ACTIVE_STATUSES,
   JobQueue,
@@ -9,6 +9,7 @@ import {
   type JobStatus,
 } from "../src/jobs/jobs.js";
 import type { ErrorContext } from "../src/providers/error-provider.js";
+import type { DiscordEvent, JobNotifier } from "../src/notify/discord.js";
 
 function sampleCtx(issue: string): ErrorContext {
   return {
@@ -136,6 +137,51 @@ describe("JobQueue", () => {
     const res = queue.enqueue({ ...makeJob("1"), id: "job-1b" });
     expect(res.accepted).toBe(true);
     expect(res.job.id).toBe("job-1b");
+  });
+
+  it("ignores transitions out of terminal states", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const store = new JobStore();
+      store.create(makeJob("1"));
+      store.updateStatus("job-1", "FAILED");
+      expect(store.updateStatus("job-1", "RUNNING")).toBeUndefined();
+      expect(store.get("job-1")!.status).toBe("FAILED");
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("terminal"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps PR_CREATED when the handler throws afterwards (no contradictory FAILED)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const store = new JobStore();
+      const events: DiscordEvent["kind"][] = [];
+      const notifier: JobNotifier = {
+        notify: async (event) => {
+          events.push(event.kind);
+        },
+      };
+      const handler: JobHandler = async (_job, update) => {
+        update("PR_CREATED", { prUrl: "https://github.com/o/r/pull/1" });
+        throw new Error("boom after PR");
+      };
+      const queue = new JobQueue(store, handler, 1, notifier);
+      queue.enqueue(makeJob("9"));
+      await tick(50);
+      const job = store.get("job-9")!;
+      expect(job.status).toBe("PR_CREATED");
+      expect(job.prUrl).toBe("https://github.com/o/r/pull/1");
+      // Exactly one pr_created notification; the late FAILED is ignored,
+      // so no contradictory repair_failed goes out.
+      expect(events.filter((k) => k === "pr_created")).toHaveLength(1);
+      expect(events).not.toContain("repair_failed");
+      // Dedup still blocks a replacement repair for the same issue.
+      expect(store.findActiveByDedupKey(job.dedupKey)?.id).toBe("job-9");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("processes jobs one at a time, in FIFO order", async () => {

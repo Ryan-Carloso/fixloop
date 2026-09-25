@@ -58,7 +58,11 @@ describe("webhook -> queue integration", () => {
     expect(body.deduped).toBe(false);
     expect(typeof body.jobId).toBe("string");
 
-    const jobRes = await app.inject({ method: "GET", url: `/jobs/${body.jobId}` });
+    const jobRes = await app.inject({
+      method: "GET",
+      url: `/jobs/${body.jobId}`,
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(jobRes.statusCode).toBe(200);
     expect(jobRes.json()).toMatchObject({
       id: body.jobId,
@@ -96,16 +100,48 @@ describe("webhook -> queue integration", () => {
     const { app } = buildTestServer();
     await postWebhook(app, payload);
     await postWebhook(app, { ...payload, id: "aaaaaaaa-0000-0000-0000-000000000000" });
-    const res = await app.inject({ method: "GET", url: "/jobs" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(res.statusCode).toBe(200);
     const jobs = res.json();
     expect(jobs).toHaveLength(2);
     expect(jobs[0].issueId).toBe("aaaaaaaa-0000-0000-0000-000000000000");
   });
 
+  it("requires the webhook token for GET /jobs", async () => {
+    const { app } = buildTestServer();
+    await postWebhook(app, payload);
+    const noToken = await app.inject({ method: "GET", url: "/jobs" });
+    expect(noToken.statusCode).toBe(401);
+    expect(noToken.json()).toEqual({ error: "invalid webhook token" });
+    const wrongToken = await app.inject({
+      method: "GET",
+      url: "/jobs",
+      headers: { "x-fixloop-webhook-token": "wrong" },
+    });
+    expect(wrongToken.statusCode).toBe(401);
+  });
+
+  it("requires the webhook token for GET /jobs/:id", async () => {
+    const { app } = buildTestServer();
+    const created = (await postWebhook(app, payload)).json();
+    const noToken = await app.inject({
+      method: "GET",
+      url: `/jobs/${created.jobId}`,
+    });
+    expect(noToken.statusCode).toBe(401);
+  });
+
   it("returns 404 for an unknown job id", async () => {
     const { app } = buildTestServer();
-    const res = await app.inject({ method: "GET", url: "/jobs/does-not-exist" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs/does-not-exist",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(res.statusCode).toBe(404);
   });
 
@@ -113,20 +149,32 @@ describe("webhook -> queue integration", () => {
     const { app } = buildTestServer();
     await postWebhook(app, payload);
     await postWebhook(app, { ...payload, id: "aaaaaaaa-0000-0000-0000-000000000000" });
-    const res = await app.inject({ method: "GET", url: "/jobs?status=QUEUED" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs?status=QUEUED",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(res.statusCode).toBe(200);
     // The blocking test handler keeps the first job RUNNING; only the
     // second stays QUEUED (concurrency 1).
     expect(res.json()).toHaveLength(1);
     expect(res.json()[0].issueId).toBe("aaaaaaaa-0000-0000-0000-000000000000");
-    const none = await app.inject({ method: "GET", url: "/jobs?status=FAILED" });
+    const none = await app.inject({
+      method: "GET",
+      url: "/jobs?status=FAILED",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(none.statusCode).toBe(200);
     expect(none.json()).toHaveLength(0);
   });
 
   it("returns 400 for an unknown ?status= value", async () => {
     const { app } = buildTestServer();
-    const res = await app.inject({ method: "GET", url: "/jobs?status=BOGUS" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs?status=BOGUS",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(res.statusCode).toBe(400);
   });
 });

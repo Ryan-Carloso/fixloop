@@ -238,7 +238,7 @@ describe("rowToJob", () => {
       note: "take a look",
       prUrl: "https://github.com/o/r/pull/42",
     });
-    const mapped = rowToJob(jobRow(job));
+    const mapped = rowToJob(jobRow(job), job.status, job.errorContext);
     expect(mapped).toEqual({
       id: job.id,
       dedupKey: job.dedupKey,
@@ -255,13 +255,18 @@ describe("rowToJob", () => {
   });
 
   it("turns null note/pr_url into undefined and Date timestamps into ISO strings", () => {
-    const mapped = rowToJob({
-      ...jobRow(makeJob()),
-      note: null,
-      pr_url: null,
-      created_at: new Date("2026-09-25T10:00:00.000Z"),
-      updated_at: new Date("2026-09-25T10:05:00.000Z"),
-    });
+    const job = makeJob();
+    const mapped = rowToJob(
+      {
+        ...jobRow(job),
+        note: null,
+        pr_url: null,
+        created_at: new Date("2026-09-25T10:00:00.000Z"),
+        updated_at: new Date("2026-09-25T10:05:00.000Z"),
+      },
+      job.status,
+      job.errorContext,
+    );
     expect(mapped.note).toBeUndefined();
     expect(mapped.prUrl).toBeUndefined();
     expect(mapped.createdAt).toBe("2026-09-25T10:00:00.000Z");
@@ -428,6 +433,41 @@ describe("PostgresJobStore persistence", () => {
     ).toBe(true);
   });
 
+  it("flush() drains writes enqueued while it is already flushing", async () => {
+    // Regression: flush() must not snapshot the chains once — a transition
+    // landing between the snapshot and db.end() would otherwise be lost.
+    const order: string[] = [];
+    const query = vi.fn(
+      async (
+        text: string,
+        params?: unknown[],
+      ): Promise<{ rows: Record<string, unknown>[] }> => {
+        if (text.includes("INSERT INTO fixloop_jobs")) {
+          const id = params?.[0] as string;
+          order.push(`start:${id}`);
+          await new Promise((r) => setTimeout(r, 20)); // slow write
+          order.push(`end:${id}`);
+        }
+        return { rows: [] };
+      },
+    );
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      { query },
+    );
+    const job = makeJob();
+    store.create(job);
+    const flushing = store.flush(); // snapshot taken synchronously here
+    store.updateStatus(job.id, "FAILED", { note: "late" }); // lands mid-flush
+    await flushing;
+    expect(order).toEqual([
+      `start:${job.id}`,
+      `end:${job.id}`,
+      `start:${job.id}`,
+      `end:${job.id}`,
+    ]);
+  });
+
   it("close() does not hang forever on a stuck write", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -525,8 +565,7 @@ describe("PostgresJobStore persistence", () => {
     expect(store.findActiveByDedupKey(key)?.status).toBe("PR_CREATED");
   });
 
-  it("skips rows with an invalid status instead of poisoning the store", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("skips rows with an invalid status instead of poisoning the store", async () => {    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const { client, rowsQueue } = mockDb();
       const good = makeJob({ status: "FAILED" });
@@ -542,6 +581,29 @@ describe("PostgresJobStore persistence", () => {
       expect(store.list()).toHaveLength(1); // the bogus row never hydrated
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining("invalid status"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("skips rows with a corrupt error_context instead of trusting the cast", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { client, rowsQueue } = mockDb();
+      const good = makeJob({ status: "FAILED" });
+      rowsQueue.push([
+        jobRow(good),
+        { ...jobRow(makeJob()), error_context: { provider: 42 } },
+      ]);
+      const store = await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        client,
+      );
+      expect(store.get(good.id)?.status).toBe("FAILED");
+      expect(store.list()).toHaveLength(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("invalid error_context"),
       );
     } finally {
       warn.mockRestore();
@@ -576,13 +638,18 @@ describe("PostgresJobStore with the HTTP layer", () => {
       "postgres://localhost:5432/fixloop",
       client,
     );
-    const app = buildServer({ store });
+    const app = buildServer({ store, webhookSecret: "test-secret" });
+    const headers = { "x-fixloop-webhook-token": "test-secret" };
 
-    const listRes = await app.inject({ method: "GET", url: "/jobs" });
+    const listRes = await app.inject({ method: "GET", url: "/jobs", headers });
     expect(listRes.statusCode).toBe(200);
     expect(listRes.json()).toMatchObject([{ id: job.id, status: "FAILED" }]);
 
-    const getRes = await app.inject({ method: "GET", url: `/jobs/${job.id}` });
+    const getRes = await app.inject({
+      method: "GET",
+      url: `/jobs/${job.id}`,
+      headers,
+    });
     expect(getRes.statusCode).toBe(200);
     expect(getRes.json()).toMatchObject({ id: job.id });
   });

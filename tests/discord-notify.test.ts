@@ -218,6 +218,29 @@ describe("DiscordNotifier.notify", () => {
     }
   });
 
+  it("redacts the webhook id/token segments when only part of the URL leaks", async () => {
+    // Some client errors surface just the path, not the exact configured
+    // URL — the /webhooks/<id>/<token> segments must still be scrubbed.
+    const url = "https://discord.com/api/webhooks/123/supersecrettoken";
+    const notifier = DiscordNotifier.fromEnv({ DISCORD_WEBHOOK_URL: url });
+    fetchMock.mockRejectedValueOnce(
+      new TypeError("fetch failed for /api/webhooks/123/supersecrettoken"),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await notifier.notify({ kind: "repair_started", job: jobRef() });
+      const logged = warn.mock.calls
+        .map((call) => String(call[0]))
+        .join("\n");
+      expect(warn).toHaveBeenCalled();
+      expect(logged).not.toContain("supersecrettoken");
+      expect(logged).not.toContain("/webhooks/123/");
+      expect(logged).toContain("/webhooks/[redacted]");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("truncates an over-long failure reason to Discord's embed limit", async () => {
     await enabledNotifier().notify({
       kind: "repair_failed",

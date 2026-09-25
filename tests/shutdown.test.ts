@@ -68,4 +68,57 @@ describe("registerShutdown", () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect(exitCode).toBe(0);
   });
+
+  it("stops the HTTP server before flushing the store", async () => {
+    const order: string[] = [];
+    const close = vi.fn(async () => {
+      order.push("close");
+    });
+    const beforeClose = vi.fn(async () => {
+      order.push("beforeClose");
+    });
+    let exitCode: number | undefined;
+    const handlers = new Map<string, () => void>();
+    registerShutdown(
+      { close },
+      {
+        onSignal: (signal, handler) => {
+          handlers.set(signal, handler);
+        },
+        exit: (code) => {
+          exitCode = code;
+        },
+        beforeClose,
+      },
+    );
+    handlers.get("SIGTERM")!();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(beforeClose).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["beforeClose", "close"]);
+    expect(exitCode).toBe(0);
+  });
+
+  it("still flushes when beforeClose rejects", async () => {
+    const close = vi.fn(async () => {});
+    let exitCode: number | undefined;
+    const handlers = new Map<string, () => void>();
+    registerShutdown(
+      { close },
+      {
+        onSignal: (signal, handler) => {
+          handlers.set(signal, handler);
+        },
+        exit: (code) => {
+          exitCode = code;
+        },
+        beforeClose: () => {
+          throw new Error("server already closed");
+        },
+      },
+    );
+    handlers.get("SIGTERM")!();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(exitCode).toBe(0);
+  });
 });

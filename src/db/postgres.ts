@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import { JobStore, isJobStatus, type Job, type JobStatus } from "../jobs/jobs.js";
-import type { ErrorContext } from "../providers/error-provider.js";
+import {
+  errorContextSchema,
+  type ErrorContext,
+} from "../providers/error-provider.js";
 
 /**
  * Loads src/db/schema.sql (copied next to dist/db/schema.sql by the
@@ -96,15 +99,24 @@ function dbErrorMessage(err: unknown): string {
 }
 
 /** Maps a fixloop_jobs row to the Job interface. */
-export function rowToJob(row: Record<string, unknown>): Job {
+/**
+ * Maps a raw Postgres row to a Job. Status and errorContext must already
+ * be validated by the caller (see hydrate); they are passed in so this
+ * function never casts database content.
+ */
+export function rowToJob(
+  row: Record<string, unknown>,
+  status: JobStatus,
+  errorContext: ErrorContext,
+): Job {
   return {
     id: String(row.id),
     dedupKey: String(row.dedup_key),
     provider: String(row.provider),
     repository: String(row.repository),
     issueId: String(row.issue_id),
-    status: row.status as JobStatus,
-    errorContext: row.error_context as ErrorContext,
+    status,
+    errorContext,
     note: row.note == null ? undefined : String(row.note),
     prUrl: row.pr_url == null ? undefined : String(row.pr_url),
     createdAt: toIso(row.created_at),
@@ -143,7 +155,8 @@ function jobParams(job: Job): unknown[] {
  * Redaction boundary: free-text failure notes are sanitized with
  * sanitizeForPr at capture (JobQueue.runOne), so every sink stays
  * redacted. errorContext is retained verbatim as structured diagnostics —
- * same trust boundary as the server logs, which already carry it.
+ * it is served by GET /jobs*, which require the pre-shared webhook token
+ * (see checkAuth in server.ts); never expose those endpoints without auth.
  */
 export class PostgresJobStore extends JobStore {
   /**
@@ -197,7 +210,16 @@ export class PostgresJobStore extends JobStore {
         );
         continue;
       }
-      const job = rowToJob(row);
+      const parsedContext = errorContextSchema.safeParse(row.error_context);
+      if (!parsedContext.success) {
+        // Same policy for the diagnostics blob: a corrupt JSONB must not
+        // flow into the typed pipeline wearing an unchecked shape.
+        console.warn(
+          `Postgres job store: skipping row ${String(row.id)} with invalid error_context.`,
+        );
+        continue;
+      }
+      const job = rowToJob(row, row.status, parsedContext.data);
       // Bypass the write-behind: these rows are already in Postgres.
       super.create(job);
       if (CRASHED_STATUSES.has(job.status)) {
@@ -262,11 +284,15 @@ export class PostgresJobStore extends JobStore {
   }
 
   /**
-   * Awaits all in-flight write-behind chains. Call before shutdown so the
-   * final transitions are not lost.
+   * Awaits all in-flight write-behind chains. Drain-loops: a transition
+   * enqueued while we were awaiting must also commit, otherwise close()
+   * could end the pool with writes still pending. close() races this
+   * against SHUTDOWN_FLUSH_TIMEOUT_MS, so the loop cannot hang shutdown.
    */
   async flush(): Promise<void> {
-    await Promise.all([...this.persistChains.values()]);
+    while (this.persistChains.size > 0) {
+      await Promise.allSettled([...this.persistChains.values()]);
+    }
   }
 
   /**

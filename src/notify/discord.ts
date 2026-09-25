@@ -179,11 +179,15 @@ export class DiscordNotifier implements JobNotifier {
       // Notifications must never break the repair pipeline. fetch() throws
       // with the full request URL in the message when the configured URL is
       // malformed — the URL embeds the secret token, so redact it before it
-      // can reach the logs.
+      // can reach the logs. Redact both the exact URL and the /webhooks/
+      // id/token segments, in case an error surfaces the URL percent-encoded
+      // or truncated to just the path.
       const message = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `Discord notification failed: ${message.split(webhookUrl).join("[redacted]")}`,
-      );
+      const scrubbed = message
+        .split(webhookUrl)
+        .join("[redacted]")
+        .replace(/\/webhooks\/[^\s"']+/gi, "/webhooks/[redacted]");
+      console.warn(`Discord notification failed: ${scrubbed}`);
     }
   }
 }

@@ -38,6 +38,35 @@ function tokensEqual(a: string, b: string): boolean {
   return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
+type AuthCheck = { ok: true } | { ok: false; status: 401 | 500; error: string };
+
+/**
+ * Pre-shared-token auth for every endpoint that touches job data. BugSink
+ * does not sign its outbound webhooks, so the token travels as the
+ * X-FixLoop-Webhook-Token header or as ?token=. The /jobs endpoints serve
+ * raw error diagnostics (errorContext straight from the provider payload),
+ * so they require the same token as the webhook ingest — never serve them
+ * open on a 0.0.0.0-bound server.
+ */
+function checkAuth(
+  req: { headers: Record<string, unknown>; query: unknown },
+  deps: ServerDeps,
+): AuthCheck {
+  const secret = deps.webhookSecret ?? process.env.FIXLOOP_WEBHOOK_SECRET ?? "";
+  if (!secret) {
+    return { ok: false, status: 500, error: "webhook secret not configured" };
+  }
+  const headerToken = req.headers["x-fixloop-webhook-token"];
+  const queryToken = (req.query as { token?: unknown }).token;
+  const provided =
+    (Array.isArray(headerToken) ? headerToken[0] : headerToken) ??
+    (typeof queryToken === "string" ? queryToken : undefined);
+  if (typeof provided !== "string" || !tokensEqual(provided, secret)) {
+    return { ok: false, status: 401, error: "invalid webhook token" };
+  }
+  return { ok: true };
+}
+
 /**
  * Temporary stand-in until the Docker/OpenCode repair pipeline lands
  * (phases 4-9). Keeps the webhook -> queue -> worker path exercisable.
@@ -65,6 +94,10 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   app.get("/health", async () => ({ ok: true, version: FIXLOOP_VERSION }));
 
   app.get("/jobs", async (req, reply) => {
+    const auth = checkAuth(req, deps);
+    if (!auth.ok) {
+      return reply.status(auth.status).send({ error: auth.error });
+    }
     const { status } = req.query as { status?: unknown };
     if (status !== undefined && !isJobStatus(status)) {
       return reply
@@ -75,31 +108,23 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   });
 
   app.get("/jobs/:id", async (req, reply) => {
+    const auth = checkAuth(req, deps);
+    if (!auth.ok) {
+      return reply.status(auth.status).send({ error: auth.error });
+    }
     const { id } = req.params as { id: string };
     const job = store.get(id);
     if (!job) return reply.status(404).send({ error: "job not found" });
     return job;
   });
 
-  // BugSink does not sign its outbound webhooks, so this endpoint is
-  // protected by a pre-shared token instead: send it as the
-  // X-FixLoop-Webhook-Token header or as ?token=.
   app.post("/webhooks/bugsink", async (req, reply) => {
-    const secret =
-      deps.webhookSecret ?? process.env.FIXLOOP_WEBHOOK_SECRET ?? "";
-    if (!secret) {
-      req.log.error("webhook secret not configured; refusing to accept events");
-      return reply.status(500).send({ error: "webhook secret not configured" });
-    }
-
-    const headerToken = req.headers["x-fixloop-webhook-token"];
-    const queryToken = (req.query as { token?: unknown }).token;
-    const provided =
-      (Array.isArray(headerToken) ? headerToken[0] : headerToken) ??
-      (typeof queryToken === "string" ? queryToken : undefined);
-
-    if (!provided || !tokensEqual(provided, secret)) {
-      return reply.status(401).send({ error: "invalid webhook token" });
+    const auth = checkAuth(req, deps);
+    if (!auth.ok) {
+      if (auth.status === 500) {
+        req.log.error("webhook secret not configured; refusing to accept events");
+      }
+      return reply.status(auth.status).send({ error: auth.error });
     }
 
     try {
@@ -163,14 +188,19 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
 /**
  * Registers SIGTERM/SIGINT handlers that flush the Postgres write-behind
  * and close the pool before exiting. Extracted from main() so the wiring
- * is unit-testable. In-flight HTTP requests are dropped on shutdown; the
- * priority is flushing job history so it survives the restart.
+ * is unit-testable. The HTTP server stops first (via beforeClose) so no
+ * new transitions are enqueued while the write-behind drains.
  */
 export function registerShutdown(
   store: Pick<PostgresJobStore, "close">,
   deps: {
     onSignal?: (signal: "SIGTERM" | "SIGINT", handler: () => void) => void;
     exit?: (code: number) => void;
+    /**
+     * Runs before the store flush (e.g. stop the HTTP server so no new
+     * transitions are enqueued while the write-behind drains).
+     */
+    beforeClose?: () => Promise<void> | void;
   } = {},
 ): void {
   const onSignal =
@@ -180,8 +210,14 @@ export function registerShutdown(
   const shutdown = (): void => {
     if (shuttingDown) return; // ignore repeats while the flush is running
     shuttingDown = true;
-    void store
-      .close()
+    void (async () => {
+      try {
+        await deps.beforeClose?.();
+      } catch {
+        // Non-fatal: the flush must still run.
+      }
+      await store.close();
+    })()
       .catch(() => {})
       .finally(() => exit(0));
   };
@@ -219,7 +255,9 @@ async function main(): Promise<void> {
 
   const app = buildServer({ config, store });
   if (store instanceof PostgresJobStore) {
-    registerShutdown(store);
+    // Stop accepting requests before the write-behind drains, so no new
+    // transitions are enqueued between the flush and the pool close.
+    registerShutdown(store, { beforeClose: () => app.close() });
   }
   await app.listen({ port, host });
 }

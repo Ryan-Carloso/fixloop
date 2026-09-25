@@ -1,5 +1,6 @@
 // Core FixLoop abstractions. All repair logic operates on ErrorContext;
 // nothing downstream may depend on a specific provider's payload shape.
+import { z } from "zod";
 
 export interface ExceptionInfo {
   type: string;
@@ -18,6 +19,27 @@ export interface ErrorContext {
   commitSha?: string;
   metadata?: Record<string, unknown>;
 }
+
+/**
+ * Validates an ErrorContext read back from the database. Hydration must
+ * never trust a blind cast: a hand-edited or corrupt JSONB row would flow
+ * into the typed pipeline wearing a shape it was never checked against.
+ */
+export const errorContextSchema: z.ZodType<ErrorContext> = z.object({
+  provider: z.string(),
+  issueId: z.string(),
+  project: z.string().optional(),
+  exception: z.object({
+    type: z.string(),
+    message: z.string(),
+    stacktrace: z.string().optional(),
+  }),
+  breadcrumbs: z.array(z.unknown()).optional(),
+  environment: z.string().optional(),
+  release: z.string().optional(),
+  commitSha: z.string().optional(),
+  metadata: z.record(z.unknown()).optional(),
+});
 
 export interface ErrorProvider {
   /** Stable provider name, e.g. "bugsink". Used in dedup keys and logs. */
