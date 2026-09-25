@@ -1,8 +1,9 @@
 # OpenCodeReview (Alibaba OCR) — second AI code reviewer, running side by side
 # with .github/workflows/opencode-review.yml for comparison testing.
-# Fork-safe: runs as pull_request_target (secrets available); the OCR action
-# checks out the trusted base and only fetches PR head blobs — it never
-# materializes untrusted PR code into the working tree.
+# Fork-safe: runs as pull_request_target (secrets available). As audited at
+# action SHA 486022d (2026-09-25), the OCR action checks out the trusted base
+# and only fetches PR head blobs — it never materializes untrusted PR code
+# into the working tree. Re-verify on any action bump.
 # LLM: same z.ai OpenAI-compatible endpoint + ZAI_API_KEY secret + model as the
 # existing OpenCode review. Skips gracefully when the secret is not set.
 # OCR posts its own sticky summary (marked <!-- ocr-summary -->) and inline
