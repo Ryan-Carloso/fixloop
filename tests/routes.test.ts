@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildServer } from "../src/server.js";
+import { buildServer, redactTokenFromUrl } from "../src/server.js";
 import { JobQueue, JobStore, type JobHandler } from "../src/jobs/jobs.js";
 import type { FixLoopConfig } from "../src/config/config.js";
 
@@ -209,8 +209,7 @@ describe("webhook -> queue integration", () => {
   });
 });
 
-describe("default Discord notifier wiring", () => {
-  it("notifies through DiscordNotifier.fromEnv() in the default queue", async () => {
+describe("default Discord notifier wiring", () => {  it("notifies through DiscordNotifier.fromEnv() in the default queue", async () => {
     const url = "https://discord.com/api/webhooks/123/serverwiring";
     const previousWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
     process.env.DISCORD_WEBHOOK_URL = url;
@@ -248,5 +247,26 @@ describe("default Discord notifier wiring", () => {
       }
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("redactTokenFromUrl", () => {
+  it("redacts the token query parameter", () => {
+    expect(redactTokenFromUrl("/webhooks/bugsink?token=supersecret")).toBe(
+      "/webhooks/bugsink?token=[redacted]",
+    );
+  });
+
+  it("redacts the token among other query parameters", () => {
+    expect(redactTokenFromUrl("/jobs?status=FAILED&token=abc&x=1")).toBe(
+      "/jobs?status=FAILED&token=[redacted]&x=1",
+    );
+  });
+
+  it("leaves URLs without a token untouched", () => {
+    expect(redactTokenFromUrl("/jobs?status=FAILED")).toBe(
+      "/jobs?status=FAILED",
+    );
+    expect(redactTokenFromUrl("/health")).toBe("/health");
   });
 });

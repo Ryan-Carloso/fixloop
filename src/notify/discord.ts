@@ -1,4 +1,4 @@
-import { sanitizeForPr } from "../fixloop.js";
+import { sanitizeForPr } from "../redact.js";
 
 /**
  * Minimal job reference carried in Discord notifications. Kept structural

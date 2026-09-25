@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { sanitizeForPr } from "../fixloop.js";
+import { sanitizeForPr } from "../redact.js";
 import type { ErrorContext } from "../providers/error-provider.js";
 import type { DiscordEvent, JobNotifier } from "../notify/discord.js";
 

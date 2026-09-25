@@ -17,6 +17,17 @@ import { DiscordNotifier, type JobNotifier } from "./notify/discord.js";
 
 export const FIXLOOP_VERSION = "0.1.0";
 
+/**
+ * Redacts the ?token= query parameter from a request URL. The webhook
+ * ingest route accepts the pre-shared token as ?token= (some senders
+ * cannot set headers), and Fastify's request logs include the full URL —
+ * without this, every such delivery would write the secret into the
+ * server logs.
+ */
+export function redactTokenFromUrl(url: string): string {
+  return url.replace(/([?&])token=[^&]*/g, "$1token=[redacted]");
+}
+
 export interface ServerDeps {
   /** Pre-shared token protecting the webhook endpoints. Defaults to FIXLOOP_WEBHOOK_SECRET. */
   webhookSecret?: string;
@@ -34,8 +45,13 @@ export interface ServerDeps {
 }
 
 function tokensEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  // Compare byte lengths, not string lengths: timingSafeEqual throws when
+  // the buffers differ in size, and a multibyte char makes UTF-8 byte
+  // length differ from JS string length.
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  if (aBuf.length !== bBuf.length) return false;
+  return timingSafeEqual(aBuf, bBuf);
 }
 
 type AuthCheck = { ok: true } | { ok: false; status: 401 | 500; error: string };
@@ -86,7 +102,16 @@ const stubHandler: JobHandler = async (_job, update) => {
 };
 
 export function buildServer(deps: ServerDeps = {}): FastifyInstance {
-  const app = Fastify({ logger: true });
+  const app = Fastify({
+    logger: {
+      // Redact ?token= from logged request URLs (see redactTokenFromUrl):
+      // the webhook ingest accepts the secret as a query parameter.
+      redact: {
+        paths: ["req.url"],
+        censor: (value) => redactTokenFromUrl(String(value)),
+      },
+    },
+  });
   const bugsink = new BugSinkProvider();
   const config = deps.config ?? { repositories: {} };
   const store = deps.store ?? new JobStore();

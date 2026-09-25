@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { FixLoop, sanitizeForPr } from "../src/fixloop.js";
+import { FixLoop } from "../src/fixloop.js";
+import { sanitizeForPr } from "../src/redact.js";
 import type { DockerRunner, CommandResult } from "../src/docker/runner.js";
 import type { CodingAgent } from "../src/agent/opencode.js";
 import type { ErrorContext } from "../src/providers/error-provider.js";

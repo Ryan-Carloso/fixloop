@@ -144,6 +144,26 @@ describe("POST /webhooks/bugsink", () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it("returns 401 (not 500) when a multibyte token has the same string length", async () => {
+    // "sécret" is 6 chars / 7 bytes; "secrex" is 6 chars / 6 bytes. The
+    // comparison must use byte lengths, or timingSafeEqual throws.
+    const app = buildServer({ webhookSecret: "sécret" });
+    const res = await app.inject({
+      method: "POST",
+      url: "/webhooks/bugsink",
+      headers: { "x-fixloop-webhook-token": "secrex" },
+      payload: validPayload,
+    });
+    expect(res.statusCode).toBe(401);
+    const ok = await app.inject({
+      method: "POST",
+      url: "/webhooks/bugsink",
+      headers: { "x-fixloop-webhook-token": "sécret" },
+      payload: validPayload,
+    });
+    expect(ok.statusCode).toBe(202);
+  });
+
   it("rejects malformed payloads with 400", async () => {
     const app = buildServer({ webhookSecret: secret });
     const res = await app.inject({
