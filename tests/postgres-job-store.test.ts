@@ -675,3 +675,34 @@ describe("PostgresJobStore with the HTTP layer", () => {
     expect(getRes.json()).toMatchObject({ id: job.id });
   });
 });
+
+describe("PostgresJobStore.connect pool cleanup", () => {
+  it("ends the pool (best-effort) when schema application fails", async () => {
+    const { query } = mockDb();
+    const end = vi.fn(async () => {});
+    const client: DbClient = { query, end };
+    query
+      .mockResolvedValueOnce({ rows: [] }) // connectivity probe ok
+      .mockRejectedValueOnce(
+        new Error("permission denied for schema public"),
+      ); // schema fails
+    await expect(
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
+    ).rejects.toThrow(/permission denied/);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends the pool (best-effort) when hydration fails", async () => {
+    const { query } = mockDb();
+    const end = vi.fn(async () => {});
+    const client: DbClient = { query, end };
+    query
+      .mockResolvedValueOnce({ rows: [] }) // probe ok
+      .mockResolvedValueOnce({ rows: [] }) // schema ok
+      .mockRejectedValueOnce(new Error("boom")); // hydration SELECT fails
+    await expect(
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
+    ).rejects.toThrow(/boom/);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+});

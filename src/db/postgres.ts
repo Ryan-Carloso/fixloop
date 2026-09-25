@@ -193,9 +193,16 @@ export class PostgresJobStore extends JobStore {
           "Is Postgres running and is DATABASE_URL correct?",
       );
     }
-    await client.query(loadSchemaSql());
     const store = new PostgresJobStore(client);
-    await store.hydrate();
+    try {
+      await client.query(loadSchemaSql());
+      await store.hydrate();
+    } catch (err) {
+      // Same best-effort cleanup as the probe path: schema or hydration
+      // failures must not leak the pool for an embedding caller.
+      await client.end?.().catch(() => {});
+      throw err;
+    }
     return store;
   }
 

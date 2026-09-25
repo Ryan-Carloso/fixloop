@@ -234,9 +234,9 @@ export const SHUTDOWN_BEFORE_CLOSE_TIMEOUT_MS = 5_000;
 /**
  * Registers SIGTERM/SIGINT handlers that stop the HTTP server, flush the
  * Postgres write-behind and close the pool before exiting. Extracted from
- * main() so the wiring is unit-testable. The HTTP server stops first (via
- * beforeClose) so no new transitions are enqueued while the write-behind
- * drains.
+ * main() so the wiring is unit-testable. beforeClose quiesces the queue
+ * (lets the active repair finish) and stops HTTP, so the write-behind
+ * flush sees every transition the active repair produced.
  */
 export function registerShutdown(
   store: Pick<PostgresJobStore, "close">,
@@ -289,6 +289,32 @@ export function registerShutdown(
   onSignal("SIGINT", shutdown);
 }
 
+/**
+ * Resolves the job store for main(). When DATABASE_URL is set, connects to
+ * Postgres and fails fast (logs the error, exits 1) when it is unreachable.
+ * Extracted from main() so the boot decision is unit-testable; the real
+ * process.on signal wiring stays inline below.
+ */
+export async function resolveStore(
+  databaseUrl: string | undefined,
+  deps: {
+    connect?: (url: string) => Promise<PostgresJobStore>;
+    exit?: (code: number) => never;
+  } = {},
+): Promise<PostgresJobStore | undefined> {
+  if (!databaseUrl) return undefined;
+  console.log("DATABASE_URL is set; using Postgres for job storage.");
+  const connect = deps.connect ?? PostgresJobStore.connect;
+  try {
+    return await connect(databaseUrl);
+  } catch (err) {
+    console.error(
+      `Failed to initialize Postgres job store: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    (deps.exit ?? process.exit)(1);
+  }
+}
+
 async function main(): Promise<void> {
   const port = Number(process.env.FIXLOOP_PORT ?? 3000);
   const host = process.env.FIXLOOP_HOST ?? "0.0.0.0";
@@ -303,25 +329,31 @@ async function main(): Promise<void> {
     );
   }
 
-  const databaseUrl = process.env.DATABASE_URL;
-  let store: JobStore | undefined;
-  if (databaseUrl) {
-    console.log("DATABASE_URL is set; using Postgres for job storage.");
-    try {
-      store = await PostgresJobStore.connect(databaseUrl);
-    } catch (err) {
-      console.error(
-        `Failed to initialize Postgres job store: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      process.exit(1);
-    }
-  }
+  const store = await resolveStore(process.env.DATABASE_URL);
 
-  const app = buildServer({ config, store });
-  if (store instanceof PostgresJobStore) {
-    // Stop accepting requests before the write-behind drains, so no new
-    // transitions are enqueued between the flush and the pool close.
-    registerShutdown(store, { beforeClose: () => app.close() });
+  let app: FastifyInstance;
+  if (store) {
+    // The Postgres branch owns the queue so shutdown can quiesce it:
+    // let the active repair finish, then stop HTTP, then flush the
+    // write-behind. Residual risk: a repair that outlasts the beforeClose
+    // timeout keeps running in the background; its late transitions are
+    // dropped by the pool close, and crash recovery marks the job
+    // interrupted on the next boot (dedup key freed).
+    const queue = new JobQueue(
+      store,
+      stubHandler,
+      1,
+      DiscordNotifier.fromEnv(),
+    );
+    app = buildServer({ config, store, queue });
+    registerShutdown(store, {
+      beforeClose: async () => {
+        await queue.stop();
+        await app.close();
+      },
+    });
+  } else {
+    app = buildServer({ config });
   }
   await app.listen({ port, host });
 }

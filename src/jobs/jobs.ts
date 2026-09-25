@@ -145,6 +145,10 @@ export interface EnqueueResult {
 export class JobQueue {
   private pending: string[] = [];
   private activeCount = 0;
+  /** Promises of the currently executing runOne() calls. */
+  private readonly inFlight = new Set<Promise<void>>();
+  /** Set by stop(): no new repairs start after this. */
+  private stopped = false;
 
   constructor(
     private readonly store: JobStore,
@@ -162,15 +166,31 @@ export class JobQueue {
     return { accepted: true, deduped: false, job };
   }
 
+  /**
+   * Quiesces the queue for shutdown: no new repairs start, and the
+   * returned promise settles once the active handlers finish, so their
+   * final transitions land in the store before the caller flushes it.
+   * Jobs still pending stay queued in the store; crash recovery handles
+   * them on the next boot. The wait is bounded by the caller's shutdown
+   * timeout — a repair that outlasts it keeps running in the background.
+   */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    await Promise.allSettled([...this.inFlight]);
+  }
+
   private async pump(): Promise<void> {
-    while (this.activeCount < this.concurrency) {
+    while (!this.stopped && this.activeCount < this.concurrency) {
       const id = this.pending.shift();
       if (!id) return;
       this.activeCount++;
+      const run = this.runOne(id);
+      this.inFlight.add(run);
       try {
-        await this.runOne(id);
+        await run;
       } finally {
         this.activeCount--;
+        this.inFlight.delete(run);
       }
     }
   }

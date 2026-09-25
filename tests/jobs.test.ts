@@ -290,3 +290,60 @@ describe("ACTIVE_STATUSES", () => {
     expect(ACTIVE_STATUSES.has("PR_CREATED")).toBe(true);
   });
 });
+
+describe("JobQueue.stop", () => {
+  it("awaits the active handler so its final transition is stored", async () => {
+    const store = new JobStore();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const handler: JobHandler = async (_job, update) => {
+      await gate;
+      update("PR_CREATED", { prUrl: "https://example.com/pr/1" });
+    };
+    const queue = new JobQueue(store, handler);
+    const job = makeJob("stop-1");
+    queue.enqueue(job);
+    await tick();
+    let stopped = false;
+    const stopping = queue.stop().then(() => {
+      stopped = true;
+    });
+    await tick();
+    // The handler is still gated: stop() must not have resolved yet.
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect(stopped).toBe(true);
+    expect(store.get(job.id)?.status).toBe("PR_CREATED");
+  });
+
+  it("prevents new repairs from starting after stop()", async () => {
+    const store = new JobStore();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const started: string[] = [];
+    const handler: JobHandler = async (job, _update) => {
+      started.push(job.id);
+      await gate;
+    };
+    const queue = new JobQueue(store, handler);
+    const first = makeJob("stop-2a");
+    const second = makeJob("stop-2b");
+    queue.enqueue(first);
+    queue.enqueue(second);
+    await tick();
+    const stopping = queue.stop();
+    await tick();
+    release();
+    await stopping;
+    await tick(50);
+    // The active repair finished; the queued one never started and stays
+    // QUEUED in the store (crash recovery handles it on next boot).
+    expect(started).toEqual([first.id]);
+    expect(store.get(second.id)?.status).toBe("QUEUED");
+  });
+});
