@@ -29,8 +29,10 @@ jobs:
     steps:
       - name: Check for ZAI_API_KEY
         id: key-check
+        env:
+          ZAI_KEY: ${{ secrets.ZAI_API_KEY }}
         run: |
-          if [ -z "${{ secrets.ZAI_API_KEY }}" ]; then
+          if [ -z "$ZAI_KEY" ]; then
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "::notice::ZAI_API_KEY secret is not set — skipping OCR review."
           else
