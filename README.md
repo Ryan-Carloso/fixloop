@@ -147,6 +147,11 @@ Environment variables:
 - `FIXLOOP_PORT`: API port (default `3000`).
 - `FIXLOOP_HOST`: API bind address (default `0.0.0.0`).
 - `FIXLOOP_CONFIG`: Path to the config file (default `fixloop.config.yaml`).
+- `DATABASE_URL`: Postgres connection string (e.g.
+  `postgres://user:pass@localhost:5432/fixloop`). When set, jobs are
+  persisted to Postgres so history survives restarts; the schema is applied
+  automatically on boot and the server exits if the database is unreachable.
+  When unset, FixLoop keeps the in-memory store (zero-config dev mode).
 - `DISCORD_WEBHOOK_URL`: Discord webhook URL for repair notifications
   (repair started, fix PR created, repair failed). Optional — when unset,
   notifications are silently disabled. Collected by `fixloop setup`
@@ -156,7 +161,8 @@ Environment variables:
 
 - `GET /health`: Health check.
 - `POST /webhooks/bugsink`: BugSink error webhook.
-- `GET /jobs`: List repair jobs.
+- `GET /jobs`: List repair jobs (newest first; optional `?status=` filter,
+  e.g. `?status=FAILED`).
 - `GET /jobs/:id`: Get job status.
 
 ## MVP Limitations

@@ -2,16 +2,27 @@ import { randomUUID } from "node:crypto";
 import type { ErrorContext } from "../providers/error-provider.js";
 import type { DiscordEvent, JobNotifier } from "../notify/discord.js";
 
-export type JobStatus =
-  | "QUEUED"
-  | "RUNNING"
-  | "REPRODUCING"
-  | "FIXING"
-  | "VERIFYING"
-  | "PR_CREATED"
-  | "NEEDS_HUMAN_REVIEW"
-  | "FAILED"
-  | "TIMED_OUT";
+export const JOB_STATUSES = [
+  "QUEUED",
+  "RUNNING",
+  "REPRODUCING",
+  "FIXING",
+  "VERIFYING",
+  "PR_CREATED",
+  "NEEDS_HUMAN_REVIEW",
+  "FAILED",
+  "TIMED_OUT",
+] as const;
+
+export type JobStatus = (typeof JOB_STATUSES)[number];
+
+/** True when the value is a known job status (used to validate ?status=). */
+export function isJobStatus(value: unknown): value is JobStatus {
+  return (
+    typeof value === "string" &&
+    (JOB_STATUSES as readonly string[]).includes(value)
+  );
+}
 
 export interface Job {
   id: string;
@@ -24,7 +35,7 @@ export interface Job {
   status: JobStatus;
   errorContext: ErrorContext;
   note?: string;
-  /** URL of the fix PR, set when the job reaches PR_CREATED. */
+  /** URL of the fix PR, set when the repair produces a pull request. */
   prUrl?: string;
   createdAt: string;
   updatedAt: string;
@@ -64,10 +75,11 @@ export class JobStore {
     return this.jobs.get(id);
   }
 
-  list(): Job[] {
-    return [...this.jobs.values()].sort((a, b) =>
+  list(status?: JobStatus): Job[] {
+    const jobs = [...this.jobs.values()].sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt),
     );
+    return status ? jobs.filter((job) => job.status === status) : jobs;
   }
 
   updateStatus(

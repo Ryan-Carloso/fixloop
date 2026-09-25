@@ -5,10 +5,12 @@ import {
   JobQueue,
   JobStore,
   dedupKey,
+  isJobStatus,
   newJobId,
   type Job,
   type JobHandler,
 } from "./jobs/jobs.js";
+import { PostgresJobStore } from "./db/postgres.js";
 import { BugSinkProvider } from "./providers/bugsink.js";
 import { ErrorParseError } from "./providers/error-provider.js";
 import { DiscordNotifier, type JobNotifier } from "./notify/discord.js";
@@ -57,7 +59,15 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
 
   app.get("/health", async () => ({ ok: true, version: FIXLOOP_VERSION }));
 
-  app.get("/jobs", async () => store.list());
+  app.get("/jobs", async (req, reply) => {
+    const { status } = req.query as { status?: unknown };
+    if (status !== undefined && !isJobStatus(status)) {
+      return reply
+        .status(400)
+        .send({ error: `unknown status: ${String(status)}` });
+    }
+    return store.list(status);
+  });
 
   app.get("/jobs/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -159,7 +169,19 @@ async function main(): Promise<void> {
     );
   }
 
-  const app = buildServer({ config });
+  const databaseUrl = process.env.DATABASE_URL;
+  let store: JobStore | undefined;
+  if (databaseUrl) {
+    console.log("DATABASE_URL is set; using Postgres for job storage.");
+    try {
+      store = await PostgresJobStore.connect(databaseUrl);
+    } catch (err) {
+      console.error(`Failed to initialize Postgres job store: ${(err as Error).message}`);
+      process.exit(1);
+    }
+  }
+
+  const app = buildServer({ config, store });
   await app.listen({ port, host });
 }
 

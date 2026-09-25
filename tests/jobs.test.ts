@@ -61,6 +61,15 @@ describe("JobStore", () => {
     expect(ids).toEqual(["job-2", "job-1"]);
   });
 
+  it("filters by status when one is given", () => {
+    const store = new JobStore();
+    store.create({ ...makeJob("1"), status: "FAILED" });
+    store.create({ ...makeJob("2"), status: "QUEUED" });
+    expect(store.list("FAILED").map((j) => j.id)).toEqual(["job-1"]);
+    expect(store.list("QUEUED").map((j) => j.id)).toEqual(["job-2"]);
+    expect(store.list()).toHaveLength(2);
+  });
+
   it("updateStatus changes status and bumps updatedAt", async () => {
     const store = new JobStore();
     const job = makeJob("1");
