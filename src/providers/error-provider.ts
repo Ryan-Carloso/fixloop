@@ -32,11 +32,17 @@ export const errorContextSchema: z.ZodType<ErrorContext> = z
     provider: z.string(),
     issueId: z.string(),
     project: z.string().optional(),
-    exception: z.object({
-      type: z.string(),
-      message: z.string(),
-      stacktrace: z.string().optional(),
-    }),
+    exception: z
+      .object({
+        type: z.string(),
+        message: z.string(),
+        stacktrace: z.string().optional(),
+      })
+      // Nested unknown keys (e.g. a future exception.cause or
+      // provider-specific fields) must survive hydration round-trips too:
+      // without this they are stripped on read and the stripped shape is
+      // re-upserted on the next status write, making the loss permanent.
+      .passthrough(),
     breadcrumbs: z.array(z.unknown()).optional(),
     environment: z.string().optional(),
     release: z.string().optional(),

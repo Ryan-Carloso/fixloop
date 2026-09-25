@@ -944,3 +944,38 @@ describe("PostgresJobStore single-instance advisory lock", () => {
     expect(pgControl.poolConnect).not.toHaveBeenCalled();
   });
 });
+
+describe("error-context hydration fidelity", () => {
+  it("preserves unknown nested exception fields across the hydration round-trip", async () => {
+    // Regression: errorContextSchema only had a top-level .passthrough(),
+    // so a future exception.cause (or any provider-specific nested field)
+    // was stripped on every hydration — and the stripped shape was then
+    // re-upserted on the next status write, making the loss permanent.
+    const { client, rowsQueue } = mockDb();
+    const job = makeJob({ status: "FAILED" });
+    const row = jobRow(job);
+    row.error_context = {
+      ...job.errorContext,
+      futureTopLevel: "kept",
+      exception: {
+        type: "Boom",
+        message: "boom",
+        cause: { type: "RootCause", message: "the real reason" },
+        futureNested: 42,
+      },
+    };
+    rowsQueue.push([row]);
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    expect(store.get(job.id)?.errorContext).toMatchObject({
+      futureTopLevel: "kept",
+      exception: {
+        type: "Boom",
+        cause: { type: "RootCause", message: "the real reason" },
+        futureNested: 42,
+      },
+    });
+  });
+});

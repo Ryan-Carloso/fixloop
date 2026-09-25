@@ -312,3 +312,23 @@ describe("redactTokenFromUrl", () => {
     expect(redactTokenFromUrl("/health")).toBe("/health");
   });
 });
+
+describe("redactTokenFromUrl percent-encoded keys", () => {
+  it("redacts a percent-encoded token parameter name (%74oken=)", () => {
+    // Fastify decodes parameter names, so ?%74oken=<secret> authenticates
+    // as token= while the raw logged URL hides from a literal match.
+    expect(redactTokenFromUrl("/webhooks/bugsink?%74oken=supersecret")).toBe(
+      "/webhooks/bugsink?token=[redacted]",
+    );
+  });
+
+  it("still redacts when only part of the name is encoded", () => {
+    expect(redactTokenFromUrl("/webhooks/bugsink?tok%65n=abc")).toBe(
+      "/webhooks/bugsink?token=[redacted]",
+    );
+  });
+
+  it("leaves malformed percent sequences untouched rather than throwing", () => {
+    expect(redactTokenFromUrl("/jobs?status=%zz")).toBe("/jobs?status=%zz");
+  });
+});

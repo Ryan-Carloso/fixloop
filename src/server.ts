@@ -25,7 +25,17 @@ export const FIXLOOP_VERSION = "0.1.0";
  * server logs.
  */
 export function redactTokenFromUrl(url: string): string {
-  return url.replace(/([?&])token=[^&]*/g, "$1token=[redacted]");
+  // Fastify decodes percent-encoded parameter names, so ?%74oken=<secret>
+  // authenticates as token= while the raw logged URL hides from a literal
+  // match. Decode first so encoded keys redact too; a malformed URL keeps
+  // its raw form rather than throwing inside a log hook.
+  let normalized: string;
+  try {
+    normalized = decodeURIComponent(url);
+  } catch {
+    normalized = url;
+  }
+  return normalized.replace(/([?&])token=[^&]*/g, "$1token=[redacted]");
 }
 
 export interface ServerDeps {
