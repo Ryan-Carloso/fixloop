@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ErrorContext } from "../providers/error-provider.js";
+import type { DiscordEvent, JobNotifier } from "../notify/discord.js";
 
 export type JobStatus =
   | "QUEUED"
@@ -23,6 +24,8 @@ export interface Job {
   status: JobStatus;
   errorContext: ErrorContext;
   note?: string;
+  /** URL of the fix PR, set when the job reaches PR_CREATED. */
+  prUrl?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -111,6 +114,7 @@ export class JobQueue {
     private readonly store: JobStore,
     private readonly handler: JobHandler,
     private readonly concurrency = 1,
+    private readonly notifier?: JobNotifier,
   ) {}
 
   enqueue(job: Job): EnqueueResult {
@@ -138,8 +142,10 @@ export class JobQueue {
   private async runOne(id: string): Promise<void> {
     const job = this.store.get(id);
     if (!job) return;
-    const update: JobUpdate = (status, patch) =>
-      this.store.updateStatus(id, status, patch);
+    const update: JobUpdate = (status, patch) => {
+      const updated = this.store.updateStatus(id, status, patch);
+      this.notifyTransition(updated);
+    };
     update("RUNNING");
     try {
       await this.handler(job, update);
@@ -148,5 +154,37 @@ export class JobQueue {
         note: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Fire-and-forget Discord notification for the job-lifecycle transitions
+   * the user cares about. Never throws: a broken notifier must not break
+   * the queue (and DiscordNotifier.notify never rejects anyway).
+   */
+  private notifyTransition(job: Job | undefined): void {
+    if (!job || !this.notifier) return;
+    let event: DiscordEvent | undefined;
+    switch (job.status) {
+      case "RUNNING":
+        event = { kind: "repair_started", job };
+        break;
+      case "PR_CREATED":
+        event = { kind: "pr_created", job, prUrl: job.prUrl };
+        break;
+      case "FAILED":
+      case "TIMED_OUT":
+        event = {
+          kind: "repair_failed",
+          job,
+          reason: job.note ?? "unknown reason",
+        };
+        break;
+      case "NEEDS_HUMAN_REVIEW":
+        event = { kind: "needs_review", job, note: job.note };
+        break;
+      default:
+        break;
+    }
+    if (event) void this.notifier.notify(event);
   }
 }

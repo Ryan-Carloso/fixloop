@@ -11,6 +11,7 @@ import {
 } from "./jobs/jobs.js";
 import { BugSinkProvider } from "./providers/bugsink.js";
 import { ErrorParseError } from "./providers/error-provider.js";
+import { DiscordNotifier, type JobNotifier } from "./notify/discord.js";
 
 export const FIXLOOP_VERSION = "0.1.0";
 
@@ -21,6 +22,8 @@ export interface ServerDeps {
   store?: JobStore;
   queue?: JobQueue;
   handleJob?: JobHandler;
+  /** Discord notifier. Defaults to DiscordNotifier.fromEnv() (no-op when DISCORD_WEBHOOK_URL is unset). */
+  notifier?: JobNotifier;
 }
 
 function tokensEqual(a: string, b: string): boolean {
@@ -44,7 +47,13 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   const config = deps.config ?? { repositories: {} };
   const store = deps.store ?? new JobStore();
   const queue =
-    deps.queue ?? new JobQueue(store, deps.handleJob ?? stubHandler);
+    deps.queue ??
+    new JobQueue(
+      store,
+      deps.handleJob ?? stubHandler,
+      1,
+      deps.notifier ?? DiscordNotifier.fromEnv(),
+    );
 
   app.get("/health", async () => ({ ok: true, version: FIXLOOP_VERSION }));
 

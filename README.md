@@ -147,6 +147,9 @@ Environment variables:
 - `FIXLOOP_PORT`: API port (default `3000`).
 - `FIXLOOP_HOST`: API bind address (default `0.0.0.0`).
 - `FIXLOOP_CONFIG`: Path to the config file (default `fixloop.config.yaml`).
+- `DISCORD_WEBHOOK_URL`: Discord webhook URL for repair notifications
+  (repair started, fix PR created, repair failed). Optional — when unset,
+  notifications are silently disabled.
 
 ## API Endpoints
 
