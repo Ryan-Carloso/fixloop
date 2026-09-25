@@ -166,7 +166,16 @@ export class JobQueue {
 
   enqueue(job: Job): EnqueueResult {
     const existing = this.store.findActiveByDedupKey(job.dedupKey);
-    if (existing) return { accepted: false, deduped: true, job: existing };
+    if (existing) {
+      if (this.stopped) {
+        // While quiescing, a dedup hit must 503 like a fresh job: the
+        // sender's first attempt got 503 (persisted, no repair started in
+        // this process), so answering 202 here would end its retry cycle
+        // and the repair would be silently lost.
+        return { accepted: false, deduped: false, job: existing };
+      }
+      return { accepted: false, deduped: true, job: existing };
+    }
     this.store.create(job);
     if (this.stopped) {
       // The queue is quiescing for shutdown: persist the job so crash

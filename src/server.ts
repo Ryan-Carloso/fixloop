@@ -404,7 +404,9 @@ async function main(): Promise<void> {
       },
     });
   } else {
-    app = buildServer({ config });
+    // Reuse the notifier built above: buildServer() would otherwise
+    // construct a second one, warning twice about the unset webhook URL.
+    app = buildServer({ config, notifier });
   }
   await app.listen({ port, host });
 }

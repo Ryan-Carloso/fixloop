@@ -67,7 +67,12 @@ export interface LockClient {
     text: string,
     params?: unknown[],
   ): Promise<{ rows: Record<string, unknown>[] }>;
-  release(): void;
+  /**
+   * Release the client back to the pool. A truthy error destroys the
+   * connection instead — used when the unlock query is still in flight
+   * at release time (pg.PoolClient.release(err) semantics).
+   */
+  release(err?: unknown): void;
 }
 
 /**
@@ -281,13 +286,25 @@ export class PostgresJobStore extends JobStore {
       if (!lockClient) return;
       const lock = lockClient;
       lockClient = undefined;
-      await Promise.race([
+      const outcome = await Promise.race([
         lock
           .query("SELECT pg_advisory_unlock($1)", [ADVISORY_LOCK_KEY])
-          .catch(() => {}),
-        sleep(LOCK_RELEASE_TIMEOUT_MS),
+          .then(
+            () => "unlocked" as const,
+            () => "failed" as const,
+          ),
+        sleep(LOCK_RELEASE_TIMEOUT_MS).then(() => "timeout" as const),
       ]);
-      lock.release();
+      // If the unlock query was still in flight when the timeout won the
+      // race, the connection may be mid-query: destroy it instead of
+      // returning it to the pool, where a new caller could receive the
+      // late unlock result. pg destroys the client when release() gets a
+      // truthy error.
+      lock.release(
+        outcome === "timeout"
+          ? new Error("advisory lock unlock timed out; destroying the client")
+          : undefined,
+      );
     };
     try {
       await client.query("SELECT 1");

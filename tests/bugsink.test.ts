@@ -231,4 +231,31 @@ describe("POST /webhooks/bugsink", () => {
     });
     expect(res.statusCode).toBe(500);
   });
+  describe("webhook dedup while the queue is stopped", () => {
+    it("answers 503 (not 202 deduped) when the sender retries during shutdown", async () => {
+      // Sequence: BugSink posts during shutdown -> 503 (job persisted, no
+      // repair starts) -> BugSink retries -> the persisted QUEUED row is a
+      // dedup hit. Answering 202 here would end the sender's retry cycle
+      // and the repair would be silently lost.
+      const store = new JobStore();
+      const queue = new JobQueue(store, async () => {});
+      const app = buildServer({ webhookSecret: secret, config, queue });
+      await queue.stop();
+      const post = () =>
+        app.inject({
+          method: "POST",
+          url: "/webhooks/bugsink",
+          headers: { "x-fixloop-webhook-token": secret },
+          payload: validPayload,
+        });
+      expect((await post()).statusCode).toBe(503);
+      const retry = await post();
+      expect(retry.statusCode).toBe(503);
+      expect(retry.json()).toMatchObject({
+        received: true,
+        queued: false,
+        reason: "server is shutting down",
+      });
+    });
+  });
 });

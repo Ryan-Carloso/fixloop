@@ -979,3 +979,23 @@ describe("error-context hydration fidelity", () => {
     });
   });
 });
+
+describe("PostgresJobStore advisory lock release", () => {
+  it("destroys the lock client instead of pooling it when the unlock query times out", async () => {
+    // Releasing a pg client with a query still in flight lets the pool
+    // hand the connection to a new caller, which then receives the late
+    // unlock result. On timeout the connection must be destroyed, not
+    // returned to the pool.
+    pgControl.lockQuery
+      .mockImplementationOnce(async () => ({ rows: [{ acquired: true }] }))
+      .mockImplementationOnce(async () => {
+        await new Promise(() => {});
+        return { rows: [] };
+      });
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+    );
+    await store.close();
+    expect(pgControl.lockRelease).toHaveBeenCalledWith(expect.any(Error));
+  });
+});
