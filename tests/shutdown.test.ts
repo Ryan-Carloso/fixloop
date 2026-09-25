@@ -36,14 +36,53 @@ describe("registerShutdown", () => {
     expect(exitCode()).toBe(0);
   });
 
-  it("ignores repeated signals while the flush is running", async () => {
-    const { close, handlers, exitCode } = harness();
+  it("force-exits on a repeat signal while shutdown is in flight", async () => {
+    // A hung beforeClose must not trap the operator: the second signal
+    // force-exits instead of being swallowed.
+    const exitCodes: number[] = [];
+    const close = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 50)); // slow flush
+    });
+    const handlers = new Map<string, () => void>();
+    registerShutdown(
+      { close },
+      {
+        onSignal: (signal, handler) => {
+          handlers.set(signal, handler);
+        },
+        exit: (code) => {
+          exitCodes.push(code);
+        },
+      },
+    );
     handlers.get("SIGTERM")!();
-    handlers.get("SIGTERM")!();
-    handlers.get("SIGINT")!();
-    await new Promise((r) => setTimeout(r, 10));
+    handlers.get("SIGTERM")!(); // repeat while in flight
+    expect(exitCodes[0]).toBe(1);
+    await new Promise((r) => setTimeout(r, 100));
     expect(close).toHaveBeenCalledTimes(1);
-    expect(exitCode()).toBe(0);
+  });
+
+  it("does not hang shutdown when beforeClose stalls", async () => {
+    const close = vi.fn(async () => {});
+    let exitCode: number | undefined;
+    const handlers = new Map<string, () => void>();
+    registerShutdown(
+      { close },
+      {
+        onSignal: (signal, handler) => {
+          handlers.set(signal, handler);
+        },
+        exit: (code) => {
+          exitCode = code;
+        },
+        beforeClose: () => new Promise<void>(() => {}), // never resolves
+        beforeCloseTimeoutMs: 50,
+      },
+    );
+    handlers.get("SIGTERM")!();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(exitCode).toBe(0);
   });
 
   it("still exits when close() rejects", async () => {

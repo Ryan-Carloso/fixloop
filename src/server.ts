@@ -42,6 +42,12 @@ export interface ServerDeps {
    * own JobQueue instead).
    */
   notifier?: JobNotifier;
+  /**
+   * Destination stream for request logs. Exposed for tests so the
+   * ?token= redaction wiring can be asserted end-to-end; production
+   * leaves it unset (stdout).
+   */
+  logStream?: NodeJS.WritableStream;
 }
 
 function tokensEqual(a: string, b: string): boolean {
@@ -66,6 +72,8 @@ type AuthCheck = { ok: true } | { ok: false; status: 401 | 500; error: string };
  * ingest route additionally accepts ?token= (some webhook senders cannot
  * set headers); the GET routes do not, because Fastify's request logs
  * include the full URL and would write the secret into the server logs.
+ * Query tokens are opt-in per route (allowQueryToken: true) so a future
+ * route cannot re-introduce the leak by forgetting the flag.
  */
 function checkAuth(
   req: { headers: Record<string, unknown>; query: unknown },
@@ -80,11 +88,9 @@ function checkAuth(
   const queryToken = (req.query as { token?: unknown }).token;
   const provided =
     (Array.isArray(headerToken) ? headerToken[0] : headerToken) ??
-    (opts.allowQueryToken === false
-      ? undefined
-      : typeof queryToken === "string"
-        ? queryToken
-        : undefined);
+    (opts.allowQueryToken === true && typeof queryToken === "string"
+      ? queryToken
+      : undefined);
   if (typeof provided !== "string" || !tokensEqual(provided, secret)) {
     return { ok: false, status: 401, error: "invalid webhook token" };
   }
@@ -110,6 +116,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         paths: ["req.url"],
         censor: (value) => redactTokenFromUrl(String(value)),
       },
+      ...(deps.logStream ? { stream: deps.logStream } : {}),
     },
   });
   const bugsink = new BugSinkProvider();
@@ -127,7 +134,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   app.get("/health", async () => ({ ok: true, version: FIXLOOP_VERSION }));
 
   app.get("/jobs", async (req, reply) => {
-    const auth = checkAuth(req, deps, { allowQueryToken: false });
+    const auth = checkAuth(req, deps);
     if (!auth.ok) {
       return reply.status(auth.status).send({ error: auth.error });
     }
@@ -141,7 +148,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   });
 
   app.get("/jobs/:id", async (req, reply) => {
-    const auth = checkAuth(req, deps, { allowQueryToken: false });
+    const auth = checkAuth(req, deps);
     if (!auth.ok) {
       return reply.status(auth.status).send({ error: auth.error });
     }
@@ -152,7 +159,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   });
 
   app.post("/webhooks/bugsink", async (req, reply) => {
-    const auth = checkAuth(req, deps);
+    const auth = checkAuth(req, deps, { allowQueryToken: true });
     if (!auth.ok) {
       if (auth.status === 500) {
         req.log.error("webhook secret not configured; refusing to accept events");
@@ -219,10 +226,17 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
 }
 
 /**
- * Registers SIGTERM/SIGINT handlers that flush the Postgres write-behind
- * and close the pool before exiting. Extracted from main() so the wiring
- * is unit-testable. The HTTP server stops first (via beforeClose) so no
- * new transitions are enqueued while the write-behind drains.
+ * Upper bound for stopping the HTTP server during shutdown. A stalled
+ * in-flight request must not hang the process forever.
+ */
+export const SHUTDOWN_BEFORE_CLOSE_TIMEOUT_MS = 5_000;
+
+/**
+ * Registers SIGTERM/SIGINT handlers that stop the HTTP server, flush the
+ * Postgres write-behind and close the pool before exiting. Extracted from
+ * main() so the wiring is unit-testable. The HTTP server stops first (via
+ * beforeClose) so no new transitions are enqueued while the write-behind
+ * drains.
  */
 export function registerShutdown(
   store: Pick<PostgresJobStore, "close">,
@@ -234,18 +248,35 @@ export function registerShutdown(
      * transitions are enqueued while the write-behind drains).
      */
     beforeClose?: () => Promise<void> | void;
+    /** Bound for beforeClose; override in tests. Defaults to 5s. */
+    beforeCloseTimeoutMs?: number;
   } = {},
 ): void {
   const onSignal =
     deps.onSignal ?? ((signal, handler) => process.on(signal, handler));
   const exit = deps.exit ?? ((code: number) => process.exit(code));
+  const beforeCloseTimeoutMs =
+    deps.beforeCloseTimeoutMs ?? SHUTDOWN_BEFORE_CLOSE_TIMEOUT_MS;
   let shuttingDown = false;
   const shutdown = (): void => {
-    if (shuttingDown) return; // ignore repeats while the flush is running
+    if (shuttingDown) {
+      // A repeat signal while shutdown is already in flight: the operator
+      // is asking to leave now. Force-exit instead of trapping them
+      // behind a hung beforeClose.
+      exit(1);
+      return;
+    }
     shuttingDown = true;
     void (async () => {
       try {
-        await deps.beforeClose?.();
+        await Promise.race([
+          (async () => {
+            await deps.beforeClose?.();
+          })(),
+          new Promise((resolve) =>
+            setTimeout(resolve, beforeCloseTimeoutMs),
+          ),
+        ]);
       } catch {
         // Non-fatal: the flush must still run.
       }

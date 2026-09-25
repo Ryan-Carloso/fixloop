@@ -91,6 +91,13 @@ describe("sanitizeForPr", () => {
     expect(redacted).toContain("postgres://admin:[REDACTED]@db:5432/fixloop");
   });
 
+  it("redacts credentials with an empty username", () => {
+    const input = "dial error redis://:hunter2@cache:6379/0";
+    const redacted = sanitizeForPr(input);
+    expect(redacted).not.toContain("hunter2");
+    expect(redacted).toContain("redis://:[REDACTED]@cache:6379/0");
+  });
+
   it("leaves credential-less URLs intact", () => {
     const input = "GET https://discord.com/api/webhooks/123/abc returned 200";
     expect(sanitizeForPr(input)).toBe(input);

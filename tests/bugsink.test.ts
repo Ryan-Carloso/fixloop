@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Writable } from "node:stream";
 import { BugSinkProvider } from "../src/providers/bugsink.js";
 import { buildServer } from "../src/server.js";
 import { JobQueue, JobStore, type JobHandler } from "../src/jobs/jobs.js";
@@ -173,6 +174,33 @@ describe("POST /webhooks/bugsink", () => {
       payload: { nope: true },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("never writes the ?token= secret to the request logs", async () => {
+    // The ingest route accepts ?token= for senders that cannot set
+    // headers; the pino redact wiring must keep it out of the logs.
+    const chunks: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        callback();
+      },
+    });
+    const app = buildServer({ webhookSecret: secret, config, logStream });
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhooks/bugsink?token=${secret}`,
+      payload: validPayload,
+    });
+    expect(res.statusCode).toBe(202);
+    let logs = "";
+    for (let i = 0; i < 100 && !logs.includes("request completed"); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      logs = chunks.join("");
+    }
+    expect(logs).toContain("request completed");
+    expect(logs).toContain("token=[redacted]");
+    expect(logs).not.toContain(secret);
   });
 
   it("fails closed when no webhook secret is configured", async () => {
