@@ -98,7 +98,11 @@ const SELECT_ALL = `
   SELECT id, dedup_key, provider, repository, issue_id, status,
          error_context, note, pr_url, created_at, updated_at
   FROM fixloop_jobs
-  ORDER BY created_at DESC
+  -- id as tiebreaker: created_at comes from Date.toISOString()
+  -- (millisecond precision), so a burst of webhook deliveries can tie.
+  -- Without it, which rows fall beyond the LIMIT window is
+  -- nondeterministic across boots.
+  ORDER BY created_at DESC, id DESC
   LIMIT ${HYDRATE_ROW_LIMIT + 1}
 `;
 
@@ -312,8 +316,10 @@ export class PostgresJobStore extends JobStore {
       await client.query("SELECT 1");
     } catch (err) {
       // Best-effort cleanup: a failed probe with a real pg.Pool leaves
-      // sockets and retry timers behind otherwise.
-      await client.end?.().catch(() => {});
+      // sockets and retry timers behind otherwise. Only the pool this
+      // module created is ended — a caller-injected DbClient is owned by
+      // the caller and must not be closed out from under them.
+      await pool?.end?.().catch(() => {});
       throw new Error(
         `FixLoop could not reach Postgres (DATABASE_URL): ${dbErrorMessage(err)}. ` +
           "Is Postgres running and is DATABASE_URL correct?",
@@ -352,8 +358,10 @@ export class PostgresJobStore extends JobStore {
     } catch (err) {
       // Same best-effort cleanup as the probe path: schema, lock, or
       // hydration failures must not leak the pool for an embedding caller.
+      // Only the pool created above is ended; an injected DbClient stays
+      // open — its owner decides its lifetime.
       await releaseLock();
-      await client.end?.().catch(() => {});
+      await pool?.end?.().catch(() => {});
       throw err;
     }
     return store;
@@ -369,8 +377,14 @@ export class PostgresJobStore extends JobStore {
    */
   private async assertNoSchemaDrift(client: DbClient): Promise<void> {
     const { rows } = await client.query(
+      // Schema-qualified to the session's search_path: an unqualified
+      // CREATE TABLE above lands in the first of these schemas, so the
+      // drift check must look at exactly those — a table_name-only
+      // filter could match another user's fixloop_jobs visible through
+      // the search_path and fail boot with a false drift error.
       `SELECT data_type FROM information_schema.columns
-       WHERE table_name = 'fixloop_jobs' AND column_name = 'id'`,
+       WHERE table_name = 'fixloop_jobs' AND column_name = 'id'
+         AND table_schema = ANY (current_schemas(false))`,
     );
     const dataType = rows[0]?.data_type;
     // No row: fresh table, the schema above just created it.

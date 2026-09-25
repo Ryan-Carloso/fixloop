@@ -226,7 +226,17 @@ describe("PostgresJobStore.connect", () => {
     expect(schemaQuery).toBeDefined();
   });
 
-  it("ends the pool (best-effort) when the connectivity probe fails", async () => {
+  it("ends the pool it created (best-effort) when the connectivity probe fails", async () => {
+    pgControl.query.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+    await expect(
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop"),
+    ).rejects.toThrow(/could not reach postgres/i);
+    expect(pgControl.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a caller-injected DbClient open when the connectivity probe fails", async () => {
+    // A caller-owned client must not be closed out from under them: its
+    // owner decides its lifetime.
     const { query } = mockDb();
     const end = vi.fn(async () => {});
     const client: DbClient = { query, end };
@@ -234,18 +244,14 @@ describe("PostgresJobStore.connect", () => {
     await expect(
       PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
     ).rejects.toThrow(/could not reach postgres/i);
-    expect(end).toHaveBeenCalledTimes(1);
+    expect(end).not.toHaveBeenCalled();
   });
 
-  it("still throws the clear error when pool end() itself fails", async () => {
-    const { query } = mockDb();
-    const end = vi.fn(async () => {
-      throw new Error("already ended");
-    });
-    const client: DbClient = { query, end };
-    query.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+  it("still throws the clear error when the created pool's end() itself fails", async () => {
+    pgControl.query.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+    pgControl.end.mockRejectedValueOnce(new Error("already ended"));
     await expect(
-      PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop"),
     ).rejects.toThrow(/could not reach postgres/i);
   });
 
@@ -812,7 +818,19 @@ describe("PostgresJobStore.connect pool cleanup", () => {
     );
   });
 
-  it("ends the pool (best-effort) when schema application fails", async () => {
+  it("ends the pool it created (best-effort) when schema application fails", async () => {
+    pgControl.query
+      .mockResolvedValueOnce({ rows: [] }) // connectivity probe ok
+      .mockRejectedValueOnce(
+        new Error("permission denied for schema public"),
+      ); // schema fails
+    await expect(
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop"),
+    ).rejects.toThrow(/permission denied/);
+    expect(pgControl.end).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a caller-injected DbClient open when schema application fails", async () => {
     const { query } = mockDb();
     const end = vi.fn(async () => {});
     const client: DbClient = { query, end };
@@ -824,21 +842,19 @@ describe("PostgresJobStore.connect pool cleanup", () => {
     await expect(
       PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
     ).rejects.toThrow(/permission denied/);
-    expect(end).toHaveBeenCalledTimes(1);
+    expect(end).not.toHaveBeenCalled();
   });
 
-  it("ends the pool (best-effort) when hydration fails", async () => {
-    const { query } = mockDb();
-    const end = vi.fn(async () => {});
-    const client: DbClient = { query, end };
-    query
+  it("ends the pool it created (best-effort) when hydration fails", async () => {
+    pgControl.query
       .mockResolvedValueOnce({ rows: [] }) // probe ok
       .mockResolvedValueOnce({ rows: [] }) // schema ok
+      .mockResolvedValueOnce({ rows: [] }) // drift ok (no row)
       .mockRejectedValueOnce(new Error("boom")); // hydration SELECT fails
     await expect(
-      PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop"),
     ).rejects.toThrow(/boom/);
-    expect(end).toHaveBeenCalledTimes(1);
+    expect(pgControl.end).toHaveBeenCalledTimes(1);
   });
 });
 
