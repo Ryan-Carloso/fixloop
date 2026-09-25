@@ -781,3 +781,52 @@ describe("PostgresJobStore shutdown observability", () => {
     }
   });
 });
+
+describe("PostgresJobStore restart notifications", () => {
+  it("notifies repair_failed for jobs orphaned by a restart", async () => {
+    const { client, rowsQueue } = mockDb();
+    const orphan = makeJob({ status: "RUNNING" });
+    rowsQueue.push([jobRow(orphan)]);
+    const notify = vi.fn(async () => {});
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+      { notify },
+    );
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "repair_failed",
+        reason: "interrupted by server restart",
+      }),
+    );
+    // The job still goes through crash recovery as before.
+    expect(store.get(orphan.id)?.status).toBe("FAILED");
+    expect(store.get(orphan.id)?.note).toBe("interrupted by server restart");
+  });
+
+  it("does not fail hydration when the restart notifier throws", async () => {
+    const { client, rowsQueue } = mockDb();
+    rowsQueue.push([jobRow(makeJob({ status: "RUNNING" }))]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const store = await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        client,
+        {
+          notify: async () => {
+            throw new Error("discord down");
+          },
+        },
+      );
+      expect(store).toBeInstanceOf(PostgresJobStore);
+      // The fire-and-forget guard caught the throw and warned.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("notification failed"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

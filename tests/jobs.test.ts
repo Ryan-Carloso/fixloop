@@ -367,4 +367,17 @@ describe("JobQueue.stop", () => {
     expect(started).toEqual([first.id]);
     expect(store.get(second.id)?.status).toBe("QUEUED");
   });
+
+  it("persists but does not accept enqueues after stop()", async () => {
+    const store = new JobStore();
+    const queue = new JobQueue(store, async () => {});
+    await queue.stop();
+    const job = makeJob("stop-3");
+    const result = queue.enqueue(job);
+    expect(result.accepted).toBe(false);
+    expect(result.deduped).toBe(false);
+    // Persisted so crash recovery picks it up on the next boot — but the
+    // caller must not be told it was accepted, since no repair will start.
+    expect(store.get(job.id)?.status).toBe("QUEUED");
+  });
 });

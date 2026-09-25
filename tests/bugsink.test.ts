@@ -114,6 +114,25 @@ describe("POST /webhooks/bugsink", () => {
     });
   });
 
+  it("returns 503 for webhooks arriving while the queue is stopped", async () => {
+    const store = new JobStore();
+    const queue = new JobQueue(store, async () => {});
+    const app = buildServer({ webhookSecret: secret, config, queue });
+    await queue.stop();
+    const res = await app.inject({
+      method: "POST",
+      url: "/webhooks/bugsink",
+      headers: { "x-fixloop-webhook-token": secret },
+      payload: validPayload,
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({
+      received: true,
+      queued: false,
+      reason: "server is shutting down",
+    });
+  });
+
   it("also accepts the token as a ?token= query param", async () => {
     const app = buildServer({ webhookSecret: secret });
     const res = await app.inject({

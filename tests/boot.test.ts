@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolveStore } from "../src/server.js";
 import type { PostgresJobStore } from "../src/db/postgres.js";
+import type { JobNotifier } from "../src/notify/discord.js";
 
 describe("resolveStore", () => {
   it("returns undefined when DATABASE_URL is unset", async () => {
@@ -21,7 +22,25 @@ describe("resolveStore", () => {
       connect,
     });
     expect(store).toBe(fake);
-    expect(connect).toHaveBeenCalledWith("postgres://db:5432/fixloop");
+    expect(connect).toHaveBeenCalledWith(
+      "postgres://db:5432/fixloop",
+      undefined,
+    );
+  });
+
+  it("passes the notifier through to connect for restart reports", async () => {
+    const fake = {} as PostgresJobStore;
+    const connect = vi.fn(async (_url: string, _notifier?: JobNotifier) => fake);
+    const notifier = { notify: async () => {} } as JobNotifier;
+    const store = await resolveStore("postgres://db:5432/fixloop", {
+      connect,
+      notifier,
+    });
+    expect(store).toBe(fake);
+    expect(connect).toHaveBeenCalledWith(
+      "postgres://db:5432/fixloop",
+      notifier,
+    );
   });
 
   it("logs the error and exits 1 when Postgres is unreachable", async () => {

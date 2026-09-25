@@ -177,6 +177,35 @@ describe("webhook -> queue integration", () => {
     }
   });
 
+  it("warns once at buildServer, not per request, when the secret is unset", async () => {
+    const previous = process.env.FIXLOOP_WEBHOOK_SECRET;
+    delete process.env.FIXLOOP_WEBHOOK_SECRET;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const app = buildServer({ config });
+      const first = await app.inject({ method: "GET", url: "/jobs" });
+      expect(first.statusCode).toBe(500);
+      const second = await app.inject({ method: "GET", url: "/jobs/abc" });
+      expect(second.statusCode).toBe(500);
+      // One startup warning, not one per rejected request: the secret is
+      // static per process, so per-request warnings would let
+      // unauthenticated outsiders flood the logs. (The Discord "not set"
+      // warning is unrelated and pre-existing.)
+      const secretWarns = () =>
+        warn.mock.calls.filter((c) =>
+          String(c[0]).includes("webhook secret not configured"),
+        ).length;
+      expect(secretWarns()).toBe(1);
+    } finally {
+      warn.mockRestore();
+      if (previous === undefined) {
+        delete process.env.FIXLOOP_WEBHOOK_SECRET;
+      } else {
+        process.env.FIXLOOP_WEBHOOK_SECRET = previous;
+      }
+    }
+  });
+
   it("returns 404 for an unknown job id", async () => {
     const { app } = buildTestServer();
     const res = await app.inject({

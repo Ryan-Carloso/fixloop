@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import pg from "pg";
 import { JobStore, isJobStatus, type Job, type JobStatus } from "../jobs/jobs.js";
+import type { JobNotifier } from "../notify/discord.js";
 import {
   errorContextSchema,
   type ErrorContext,
@@ -177,9 +178,22 @@ export class PostgresJobStore extends JobStore {
    * Throws a clear error when the database is unreachable (fail fast).
    * Pass a DbClient to inject a fake (tests) instead of opening a real pool.
    */
+  /**
+   * Builds the store over an explicit client (tests) or a real pg.Pool
+   * (production), probes the connection, applies the schema, and hydrates
+   * persisted jobs into memory.
+   *
+   * `notifier` (optional) receives a `repair_failed` event for every job
+   * orphaned by a restart — crash recovery flips those rows directly in
+   * the store, bypassing the queue's notifyTransition, so without this
+   * the one lifecycle failure the notifier exists for would stay silent.
+   * Notifications are fire-and-forget: a broken notifier must never
+   * break hydration or boot.
+   */
   static async connect(
     databaseUrl: string,
     db?: DbClient,
+    notifier?: JobNotifier,
   ): Promise<PostgresJobStore> {
     // Bound the connect phase: pg waits forever by default
     // (connectionTimeoutMillis: 0), which would hang boot on a black-holed
@@ -204,7 +218,7 @@ export class PostgresJobStore extends JobStore {
     const store = new PostgresJobStore(client);
     try {
       await client.query(loadSchemaSql());
-      await store.hydrate();
+      await store.hydrate(notifier);
     } catch (err) {
       // Same best-effort cleanup as the probe path: schema or hydration
       // failures must not leak the pool for an embedding caller.
@@ -214,7 +228,7 @@ export class PostgresJobStore extends JobStore {
     return store;
   }
 
-  private async hydrate(): Promise<void> {
+  private async hydrate(notifier?: JobNotifier): Promise<void> {
     const { rows } = await this.db.query(SELECT_ALL);
     let skipped = 0;
     for (const row of rows) {
@@ -246,7 +260,30 @@ export class PostgresJobStore extends JobStore {
         // findActiveByDedupKey would otherwise block future repairs for
         // the same issue forever, with no operator signal. The correction
         // goes through the write-behind so the DB row is fixed as well.
-        this.updateStatus(job.id, "FAILED", { note: RESTART_NOTE });
+        const failed = this.updateStatus(job.id, "FAILED", {
+          note: RESTART_NOTE,
+        });
+        if (failed && notifier) {
+          // The queue's notifyTransition never sees these (no queue
+          // exists at hydrate time): this is the exact failure the
+          // notifier exists for, so report it directly. Fire-and-forget
+          // with the same never-throw guard as JobQueue — a broken
+          // notifier must not break hydration or boot.
+          const event = {
+            kind: "repair_failed" as const,
+            job: failed,
+            reason: RESTART_NOTE,
+          };
+          void (async () => {
+            try {
+              await notifier.notify(event);
+            } catch (err) {
+              console.warn(
+                `notification failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          })();
+        }
       }
     }
     if (skipped > 0) {

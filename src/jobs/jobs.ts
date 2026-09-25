@@ -168,6 +168,14 @@ export class JobQueue {
     const existing = this.store.findActiveByDedupKey(job.dedupKey);
     if (existing) return { accepted: false, deduped: true, job: existing };
     this.store.create(job);
+    if (this.stopped) {
+      // The queue is quiescing for shutdown: persist the job so crash
+      // recovery picks it up on the next boot, but don't start a repair
+      // in this process — pump() won't pick it up, so the caller must
+      // not be told it was accepted. (The webhook route maps this to
+      // 503.)
+      return { accepted: false, deduped: false, job };
+    }
     this.pending.push(job.id);
     void this.pump();
     return { accepted: true, deduped: false, job };

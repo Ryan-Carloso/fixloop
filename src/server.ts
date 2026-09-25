@@ -83,8 +83,10 @@ function checkAuth(
   const secret = deps.webhookSecret ?? process.env.FIXLOOP_WEBHOOK_SECRET ?? "";
   if (!secret) {
     // Fail closed, but don't disclose the misconfiguration to
-    // unauthenticated callers — the detail stays in the server logs.
-    console.warn("request rejected: webhook secret not configured");
+    // unauthenticated callers — and don't log it here either: the
+    // secret is static per process, so a per-request warning would let
+    // unauthenticated outsiders flood the server logs. buildServer()
+    // warns once at startup instead.
     return { ok: false, status: 500, error: "server misconfigured" };
   }
   const headerToken = req.headers["x-fixloop-webhook-token"];
@@ -111,6 +113,14 @@ const stubHandler: JobHandler = async (_job, update) => {
 };
 
 export function buildServer(deps: ServerDeps = {}): FastifyInstance {
+  if (!(deps.webhookSecret ?? process.env.FIXLOOP_WEBHOOK_SECRET)) {
+    // Warn once here, not per request in checkAuth: the secret is static
+    // for the process lifetime, and a per-request warning would let
+    // unauthenticated outsiders flood the server logs.
+    console.warn(
+      "webhook secret not configured (set FIXLOOP_WEBHOOK_SECRET); all authenticated routes will fail closed",
+    );
+  }
   const app = Fastify({
     logger: {
       // Redact ?token= from logged request URLs (see redactTokenFromUrl):
@@ -200,6 +210,20 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
         updatedAt: now,
       };
       const result = queue.enqueue(job);
+      if (!result.accepted && !result.deduped) {
+        // The queue is quiescing for shutdown: the job is persisted and
+        // crash recovery will mark it interrupted on the next boot, but
+        // no repair starts in this process. 503 (not a silent 202) tells
+        // the sender to retry.
+        return reply.status(503).send({
+          received: true,
+          provider: ctx.provider,
+          issueId: ctx.issueId,
+          project: ctx.project,
+          queued: false,
+          reason: "server is shutting down",
+        });
+      }
       req.log.info(
         {
           jobId: result.job.id,
@@ -303,15 +327,24 @@ export function registerShutdown(
 export async function resolveStore(
   databaseUrl: string | undefined,
   deps: {
-    connect?: (url: string) => Promise<PostgresJobStore>;
+    connect?: (
+      url: string,
+      notifier?: JobNotifier,
+    ) => Promise<PostgresJobStore>;
     exit?: (code: number) => never;
+    notifier?: JobNotifier;
   } = {},
 ): Promise<PostgresJobStore | undefined> {
   if (!databaseUrl) return undefined;
   console.log("DATABASE_URL is set; using Postgres for job storage.");
-  const connect = deps.connect ?? PostgresJobStore.connect;
+  const connect =
+    deps.connect ??
+    ((url: string, notifier?: JobNotifier) =>
+      PostgresJobStore.connect(url, undefined, notifier));
   try {
-    return await connect(databaseUrl);
+    // The notifier lets crash recovery report restart-orphaned jobs;
+    // connect() fans it out to hydrate().
+    return await connect(databaseUrl, deps.notifier);
   } catch (err) {
     console.error(
       `Failed to initialize Postgres job store: ${err instanceof Error ? err.message : String(err)}`,
@@ -334,7 +367,10 @@ async function main(): Promise<void> {
     );
   }
 
-  const store = await resolveStore(process.env.DATABASE_URL);
+  // One notifier instance shared by the queue and the Postgres store:
+  // crash recovery in hydrate() needs it to report restart-orphaned jobs.
+  const notifier = DiscordNotifier.fromEnv();
+  const store = await resolveStore(process.env.DATABASE_URL, { notifier });
 
   let app: FastifyInstance;
   if (store) {
@@ -344,12 +380,7 @@ async function main(): Promise<void> {
     // timeout keeps running in the background; its late transitions are
     // dropped by the pool close, and crash recovery marks the job
     // interrupted on the next boot (dedup key freed).
-    const queue = new JobQueue(
-      store,
-      stubHandler,
-      1,
-      DiscordNotifier.fromEnv(),
-    );
+    const queue = new JobQueue(store, stubHandler, 1, notifier);
     app = buildServer({ config, store, queue });
     registerShutdown(store, {
       beforeClose: async () => {
