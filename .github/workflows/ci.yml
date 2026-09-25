@@ -1,6 +1,6 @@
 name: ci
 
-# Run the full verification suite on every PR and every push to master:
+# Run the full verification suite on every PR and every push to main:
 # typecheck, unit tests (vitest), and build.
 on:
   pull_request:
