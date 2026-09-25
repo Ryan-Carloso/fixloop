@@ -38,3 +38,30 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  actionlint:
+    # Static validation for GitHub Actions workflow files. Runs unprivileged
+    # on pull_request (no secrets): a typo in an input name, expression, or
+    # conditional in a privileged workflow (e.g. pull_request_target + write
+    # scope) fails silently at runtime, so malformed workflow changes must
+    # fail the PR visibly here instead. actionlint exits non-zero on any
+    # finding, so the job genuinely gates the build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp
+
+      - name: Run actionlint
+        run: /tmp/actionlint/actionlint -color
