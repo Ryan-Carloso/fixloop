@@ -72,10 +72,21 @@ const MAX_DESCRIPTION_LENGTH = 4096;
 // from the external webhook payload and is unbounded.
 const MAX_FIELD_LENGTH = 1024;
 
-/** Truncate over-long text to an explicit character budget. */
-function truncateTo(text: string, max: number): string {
+/** Truncate over-long text to an explicit character budget. Exported for tests. */
+export function truncateTo(text: string, max: number): string {
+  if (max <= 0) return "";
   if (text.length <= max) return text;
-  return `${text.slice(0, Math.max(0, max - 1))}…`;
+  let end = Math.max(0, max - 1);
+  // The caller escapes markdown before truncating, so a cut can land
+  // right after a backslash and the dangling escape would eat the next
+  // character in the rendered output — back off past it. Only an odd
+  // run of trailing backslashes dangles; a complete "\\" pair is fine.
+  let backslashes = 0;
+  while (end - 1 - backslashes >= 0 && text[end - 1 - backslashes] === "\\") {
+    backslashes += 1;
+  }
+  if (backslashes % 2 === 1) end -= 1;
+  return `${text.slice(0, end)}…`;
 }
 
 /** Truncate over-long embed field values (1024-char field cap). */
@@ -92,7 +103,12 @@ function truncateField(text: string): string {
  * depth.)
  */
 function escapeDiscordMarkdown(text: string): string {
-  return text.replace(/[\\[\]()]/g, (ch) => `\\${ch}`);
+  // Backslash-escaped in a single pass: already-escaped output is never
+  // re-scanned, so the introduced backslashes are left alone. Backticks
+  // are included so a hostile issueId cannot close out of (or open)
+  // inline code and code fences; masked links ([text](url)) stay the
+  // phishing vector this guards.
+  return text.replace(/[\\[\]()`]/g, (ch) => `\\${ch}`);
 }
 
 // Discord allows 6000 characters per embed in total (title, description
@@ -216,6 +232,9 @@ export class DiscordNotifier implements JobNotifier {
         }),
       });
       if (!res.ok) {
+        // Drain (and discard) the error body: an unconsumed stream holds
+        // the keep-alive socket hostage and starves the agent's pool.
+        await res.text().catch(() => {});
         console.warn(
           `Discord webhook POST failed with status ${res.status}; notification dropped.`,
         );

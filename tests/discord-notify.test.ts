@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   DiscordNotifier,
+  truncateTo,
   type DiscordEvent,
   type JobNotifier,
 } from "../src/notify/discord.js";
@@ -279,6 +280,15 @@ describe("DiscordNotifier.notify", () => {
     await expect(
       enabledNotifier().notify({ kind: "repair_started", job: jobRef() }),
     ).resolves.toBeUndefined();
+  });
+
+  it("consumes the error body on a non-OK webhook response", async () => {
+    // An unconsumed response stream holds the keep-alive socket hostage
+    // and starves the agent's connection pool.
+    const text = vi.fn(async () => "rate limited");
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 429, text });
+    await enabledNotifier().notify({ kind: "repair_started", job: jobRef() });
+    expect(text).toHaveBeenCalledTimes(1);
   });
 
   it("redacts the webhook URL from fetch failure logs", async () => {
@@ -655,5 +665,50 @@ describe("DiscordNotifier markdown escaping in reasons, notes, and URLs", () => 
     });
     const embed = lastPayload().embeds[0];
     expect(embed.description).not.toContain(")[click](");
+  });
+
+  it("escapes backticks so code fences cannot form", async () => {
+    // An unescaped ``` in a webhook-controlled reason would render as a
+    // fenced code block (or break out of inline code) inside a trusted
+    // FixLoop notification.
+    await enabledNotifier().notify({
+      kind: "repair_failed",
+      job: jobRef(),
+      reason: "crashed: ```rm -rf /``` and `inline`",
+    });
+    const embed = lastPayload().embeds[0];
+    expect(embed.description).not.toContain("```");
+    expect(embed.description).toContain("\\`\\`\\`");
+  });
+
+  it("never truncates in the middle of a backslash escape", async () => {
+    // Fields are escaped before truncating: an issueId of "]"×600
+    // escapes to "\]"×600, and the 1024-char field cap would land
+    // exactly after a backslash — which would eat the next character
+    // in the rendered markdown.
+    const ref = { ...jobRef(), issueId: "]".repeat(600) };
+    await enabledNotifier().notify({ kind: "repair_started", job: ref });
+    const embed = lastPayload().embeds[0];
+    const issueField = embed.fields.find(
+      (f: { name: string }) => f.name === "Issue",
+    );
+    expect(issueField.value).not.toMatch(/\\…$/);
+    expect(issueField.value).toMatch(/\]…$/);
+  });
+});
+
+describe("truncateTo", () => {
+  it("returns an empty string for a zero or negative budget", () => {
+    // A non-positive budget cannot hold even the ellipsis; callers such
+    // as buildEmbed clamp their budget with Math.max(0, …) and expect
+    // "" back, not a lone "…".
+    expect(truncateTo("hello", 0)).toBe("");
+    expect(truncateTo("hello", -5)).toBe("");
+  });
+
+  it("keeps a complete backslash pair at the cut", () => {
+    // An even run of trailing backslashes is complete escape pairs —
+    // only an odd (dangling) one is backed off past.
+    expect(truncateTo("ab\\\\cdef", 5)).toBe("ab\\\\…");
   });
 });
