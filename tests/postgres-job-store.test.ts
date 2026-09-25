@@ -531,6 +531,25 @@ describe("PostgresJobStore persistence", () => {
     }
   });
 
+  it("flush() clears its race timer when the drain wins", async () => {
+    // A bare setTimeout left behind by Promise.race keeps the event loop
+    // alive for the full timeout after shutdown (and slows vitest
+    // teardown for every test calling close() with the default).
+    const { client } = mockDb();
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    const clearTimeoutSpy = vi.spyOn(global, "clearTimeout");
+    try {
+      await expect(store.flush(5_000)).resolves.toBe(true);
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+      await store.close();
+    }
+  });
+
   it("close() flushes pending writes and ends the pool", async () => {
     const { query } = mockDb();
     const end = vi.fn(async () => {});

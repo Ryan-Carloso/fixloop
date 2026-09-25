@@ -147,8 +147,26 @@ const LOCK_RELEASE_TIMEOUT_MS = 2_000;
  */
 const ADVISORY_LOCK_KEY = 2_026_092_501;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Races a promise against a timeout, clearing the timer when the race
+ * settles. A bare setTimeout left behind by Promise.race keeps the event
+ * loop alive for the full timeout even after the winner is known (slows
+ * vitest teardown and, for library users, delays process exit).
+ */
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(onTimeout()), timeoutMs);
+    });
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /** Note recorded when a restart orphans a mid-repair job. */
@@ -292,15 +310,16 @@ export class PostgresJobStore extends JobStore {
       if (!lockClient) return;
       const lock = lockClient;
       lockClient = undefined;
-      const outcome = await Promise.race([
+      const outcome = await raceWithTimeout(
         lock
           .query("SELECT pg_advisory_unlock($1)", [ADVISORY_LOCK_KEY])
           .then(
             () => "unlocked" as const,
             () => "failed" as const,
           ),
-        sleep(LOCK_RELEASE_TIMEOUT_MS).then(() => "timeout" as const),
-      ]);
+        LOCK_RELEASE_TIMEOUT_MS,
+        () => "timeout" as const,
+      );
       // If the unlock query was still in flight when the timeout won the
       // race, the connection may be mid-query: destroy it instead of
       // returning it to the pool, where a new caller could receive the
@@ -586,7 +605,7 @@ export class PostgresJobStore extends JobStore {
       }
       return true;
     })();
-    return Promise.race([drained, sleep(timeoutMs).then(() => false)]);
+    return raceWithTimeout(drained, timeoutMs, () => false);
   }
 
   /**
@@ -622,10 +641,7 @@ export class PostgresJobStore extends JobStore {
       }
       return true;
     })();
-    const closed = await Promise.race([
-      endPromise,
-      sleep(timeoutMs).then(() => false),
-    ]);
+    const closed = await raceWithTimeout(endPromise, timeoutMs, () => false);
     if (!closed) {
       console.warn(
         `Postgres job store: pool teardown timed out after ${timeoutMs}ms; ` +
