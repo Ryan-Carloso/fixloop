@@ -349,15 +349,20 @@ describe("PostgresJobStore persistence", () => {
       "postgres://localhost:5432/fixloop",
       client,
     );
+    const upserts = () =>
+      queries.filter((q) => q.text.includes("INSERT INTO fixloop_jobs"));
     const job = makeJob();
     store.create(job);
-    await vi.waitFor(() => expect(queries.length).toBeGreaterThan(0));
+    // Wait for create's own write-behind UPSERT (not just the connect-time
+    // queries) before clearing: otherwise the clear races the persist and
+    // updateStatus's assertion sees two upserts instead of one.
+    await vi.waitFor(() => expect(upserts()).toHaveLength(1));
     queries.length = 0;
 
     const updated = store.updateStatus(job.id, "PR_CREATED", {
       prUrl: "https://github.com/o/r/pull/7",
     });
-    await vi.waitFor(() => expect(queries).toHaveLength(1));
+    await vi.waitFor(() => expect(upserts()).toHaveLength(1));
 
     expect(updated?.status).toBe("PR_CREATED");
     expect(updated?.prUrl).toBe("https://github.com/o/r/pull/7");
@@ -414,6 +419,35 @@ describe("PostgresJobStore persistence", () => {
     }
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(committed).toEqual(["QUEUED", "FAILED"]);
+  });
+
+  it("a rejected write-behind tail does not drop later writes for the job", async () => {
+    // persist() swallows query errors today, so a rejected tail is latent —
+    // but the chain comment claims poison-proofing, and a future persist()
+    // that can reject would otherwise silently drop every later write for
+    // the job id (a rejected tail makes tail.then() skip persist forever).
+    const { query, client } = mockDb();
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    const job = makeJob();
+    // Seed a poisoned tail as if a previous persist had rejected.
+    const poisoned = Promise.reject(new Error("boom"));
+    poisoned.catch(() => {}); // test-side suppression only; the stored
+    // promise itself stays rejected, so the store must defend its chain.
+    (
+      store as unknown as { persistChains: Map<string, Promise<void>> }
+    ).persistChains.set(job.id, poisoned);
+
+    store.create(job); // must still persist despite the poisoned tail
+
+    await vi.waitFor(() => {
+      const upserts = query.mock.calls.filter(([text]) =>
+        (text as string).includes("INSERT INTO fixloop_jobs"),
+      );
+      expect(upserts).toHaveLength(1);
+    });
   });
 
   it("flush() waits for in-flight write-behind chains before resolving", async () => {

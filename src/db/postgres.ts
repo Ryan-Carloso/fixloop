@@ -530,10 +530,14 @@ export class PostgresJobStore extends JobStore {
     const params = jobParams(job);
     const id = job.id;
     const tail = this.persistChains.get(id) ?? Promise.resolve();
-    const next = tail.then(() => this.persist(id, params));
+    // A rejected tail must not poison the chain: without the catch, the
+    // .then() below would skip persist() and store the rejection as the
+    // new tail, silently dropping every later write for this job id.
+    const next = tail.catch(() => {}).then(() => this.persist(id, params));
     this.persistChains.set(id, next);
-    // persist() never rejects (failures are logged), but defend the chain
-    // anyway; drop the finished tail so the map cannot grow without bound.
+    // persist() never rejects (failures are logged), but the chain is
+    // poison-proof by construction now; drop the finished tail so the map
+    // cannot grow without bound.
     void next.catch(() => {}).then(() => {
       if (this.persistChains.get(id) === next) {
         this.persistChains.delete(id);
