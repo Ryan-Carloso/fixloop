@@ -196,6 +196,49 @@ describe("DiscordNotifier.notify", () => {
       enabledNotifier().notify({ kind: "repair_started", job: jobRef() }),
     ).resolves.toBeUndefined();
   });
+
+  it("redacts the webhook URL from fetch failure logs", async () => {
+    // A malformed webhook URL makes fetch() throw with the full URL
+    // (token included) in the message — it must never reach the logs.
+    const url = "https://discord.com/api/webhooks/123/supersecrettoken";
+    const notifier = DiscordNotifier.fromEnv({ DISCORD_WEBHOOK_URL: url });
+    fetchMock.mockRejectedValueOnce(
+      new TypeError(`Failed to parse URL from '${url}'`),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await notifier.notify({ kind: "repair_started", job: jobRef() });
+      const logged = warn.mock.calls
+        .map((call) => String(call[0]))
+        .join("\n");
+      expect(warn).toHaveBeenCalled();
+      expect(logged).not.toContain(url);
+      expect(logged).not.toContain("supersecrettoken");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("truncates an over-long failure reason to Discord's embed limit", async () => {
+    await enabledNotifier().notify({
+      kind: "repair_failed",
+      job: jobRef(),
+      reason: "x".repeat(10000),
+    });
+    const embed = lastPayload().embeds[0];
+    expect(embed.description.length).toBeLessThanOrEqual(4096);
+    expect(embed.description).toContain("**Reason:**");
+  });
+
+  it("truncates an over-long review note to Discord's embed limit", async () => {
+    await enabledNotifier().notify({
+      kind: "needs_review",
+      job: jobRef(),
+      note: "y".repeat(10000),
+    });
+    const embed = lastPayload().embeds[0];
+    expect(embed.description.length).toBeLessThanOrEqual(4096);
+  });
 });
 
 describe("JobQueue Discord wiring", () => {
@@ -283,5 +326,91 @@ describe("JobQueue Discord wiring", () => {
     queue.enqueue(makeJob("10"));
     await tick(100);
     expect(store.get("job-10")?.status).toBe("PR_CREATED");
+  });
+
+  it("survives a custom notifier that rejects, with no unhandled rejection", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const store = new JobStore();
+      const rejectingNotifier: JobNotifier = {
+        notify: async () => {
+          throw new Error("notifier boom");
+        },
+      };
+      const queue = new JobQueue(
+        store,
+        async (_job, update) => {
+          update("PR_CREATED", { prUrl: "https://github.com/o/r/pull/1" });
+        },
+        1,
+        rejectingNotifier,
+      );
+      queue.enqueue(makeJob("reject1"));
+      await tick(150);
+      expect(store.get("job-reject1")?.status).toBe("PR_CREATED");
+      // Give the rejected promise a chance to surface as unhandled.
+      await tick(50);
+      expect(rejections).toHaveLength(0);
+    } finally {
+      process.removeListener("unhandledRejection", onRejection);
+    }
+  });
+
+  it("survives a custom notifier that throws synchronously", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const store = new JobStore();
+      const throwingNotifier: JobNotifier = {
+        notify: () => {
+          throw new Error("sync notifier boom");
+        },
+      };
+      const queue = new JobQueue(
+        store,
+        async (_job, update) => {
+          update("PR_CREATED", { prUrl: "https://github.com/o/r/pull/1" });
+        },
+        1,
+        throwingNotifier,
+      );
+      queue.enqueue(makeJob("throw1"));
+      await tick(150);
+      expect(store.get("job-throw1")?.status).toBe("PR_CREATED");
+      await tick(50);
+      expect(rejections).toHaveLength(0);
+    } finally {
+      process.removeListener("unhandledRejection", onRejection);
+    }
+  });
+
+  it("notifies with the failure reason when the handler times out", async () => {
+    const store = new JobStore();
+    const notifier = fakeNotifier();
+    const queue = new JobQueue(
+      store,
+      async (_job, update) => {
+        update("TIMED_OUT", { note: "exceeded 30m budget" });
+      },
+      1,
+      notifier,
+    );
+    queue.enqueue(makeJob("timeout1"));
+    await tick(100);
+
+    const kinds = notifier.events.map((e) => e.kind);
+    expect(kinds).toEqual(["repair_started", "repair_failed"]);
+    const failEvent = notifier.events[1];
+    expect(failEvent.kind).toBe("repair_failed");
+    if (failEvent.kind === "repair_failed") {
+      expect(failEvent.reason).toContain("exceeded 30m budget");
+    }
   });
 });

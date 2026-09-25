@@ -49,6 +49,17 @@ function jobFields(job: DiscordJobRef): EmbedField[] {
   ];
 }
 
+// Discord caps embed descriptions at 4096 characters (6000 total per
+// request). Chatty failure reasons (stack traces, git stderr dumps) would
+// otherwise yield HTTP 400 and silently drop the notification.
+const MAX_DESCRIPTION_LENGTH = 4096;
+
+/** Truncate over-long text so the embed stays within Discord's limits. */
+function truncate(text: string): string {
+  if (text.length <= MAX_DESCRIPTION_LENGTH) return text;
+  return `${text.slice(0, MAX_DESCRIPTION_LENGTH - 1)}…`;
+}
+
 function buildEmbed(event: DiscordEvent): Record<string, unknown> {
   const base = {
     fields: jobFields(event.job),
@@ -71,24 +82,29 @@ function buildEmbed(event: DiscordEvent): Record<string, unknown> {
           : "Fix verified and PR opened (URL not recorded).",
         color: COLORS.prCreated,
       };
-    case "repair_failed":
+    case "repair_failed": {
+      // The reason may echo error output; redact secret-looking values
+      // before it leaves the machine (same policy as public PR bodies),
+      // and truncate so chatty errors stay within Discord's embed limits.
+      const description = truncate(`**Reason:** ${sanitizeForPr(event.reason)}`);
       return {
         ...base,
         title: "❌ FixLoop: repair failed",
-        // The reason may echo error output; redact secret-looking values
-        // before it leaves the machine (same policy as public PR bodies).
-        description: `**Reason:** ${sanitizeForPr(event.reason)}`,
+        description,
         color: COLORS.failed,
       };
-    case "needs_review":
+    }
+    case "needs_review": {
+      const description = event.note
+        ? truncate(`**Note:** ${sanitizeForPr(event.note)}`)
+        : "The repair pipeline did not produce a verified fix.";
       return {
         ...base,
         title: "👀 FixLoop: repair needs human review",
-        description: event.note
-          ? `**Note:** ${sanitizeForPr(event.note)}`
-          : "The repair pipeline did not produce a verified fix.",
+        description,
         color: COLORS.needsReview,
       };
+    }
   }
 }
 
@@ -120,9 +136,10 @@ export class DiscordNotifier implements JobNotifier {
   }
 
   async notify(event: DiscordEvent): Promise<void> {
-    if (!this.webhookUrl) return; // silent no-op
+    const webhookUrl = this.webhookUrl;
+    if (!webhookUrl) return; // silent no-op
     try {
-      const res = await fetch(this.webhookUrl, {
+      const res = await fetch(webhookUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -136,9 +153,13 @@ export class DiscordNotifier implements JobNotifier {
         );
       }
     } catch (err) {
-      // Notifications must never break the repair pipeline.
+      // Notifications must never break the repair pipeline. fetch() throws
+      // with the full request URL in the message when the configured URL is
+      // malformed — the URL embeds the secret token, so redact it before it
+      // can reach the logs.
+      const message = err instanceof Error ? err.message : String(err);
       console.warn(
-        `Discord notification failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Discord notification failed: ${message.split(webhookUrl).join("[redacted]")}`,
       );
     }
   }

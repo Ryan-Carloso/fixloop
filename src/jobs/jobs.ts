@@ -158,8 +158,11 @@ export class JobQueue {
 
   /**
    * Fire-and-forget Discord notification for the job-lifecycle transitions
-   * the user cares about. Never throws: a broken notifier must not break
-   * the queue (and DiscordNotifier.notify never rejects anyway).
+   * the user cares about. Never throws and never leaves an unhandled
+   * rejection: a broken notifier must not break the queue. JobNotifier is a
+   * public interface, so guard both failure modes of a custom
+   * implementation — a synchronously throwing notify() and a rejecting one
+   * (an unhandled rejection terminates the Node process).
    */
   private notifyTransition(job: Job | undefined): void {
     if (!job || !this.notifier) return;
@@ -185,6 +188,19 @@ export class JobQueue {
       default:
         break;
     }
-    if (event) void this.notifier.notify(event);
+    if (event) {
+      const report = (err: unknown): void => {
+        console.warn(
+          `notification failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      };
+      try {
+        // A synchronous throw from notify() is caught here; a rejection is
+        // caught by the .catch below.
+        void Promise.resolve(this.notifier.notify(event)).catch(report);
+      } catch (err) {
+        report(err);
+      }
+    }
   }
 }

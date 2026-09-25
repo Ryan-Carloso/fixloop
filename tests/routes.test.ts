@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildServer } from "../src/server.js";
 import { JobQueue, JobStore, type JobHandler } from "../src/jobs/jobs.js";
 import type { FixLoopConfig } from "../src/config/config.js";
@@ -107,5 +107,39 @@ describe("webhook -> queue integration", () => {
     const { app } = buildTestServer();
     const res = await app.inject({ method: "GET", url: "/jobs/does-not-exist" });
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe("default Discord notifier wiring", () => {
+  it("notifies through DiscordNotifier.fromEnv() in the default queue", async () => {
+    const url = "https://discord.com/api/webhooks/123/serverwiring";
+    process.env.DISCORD_WEBHOOK_URL = url;
+    const fetchSpy = vi.fn(async () => ({ ok: true, status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      // No queue/notifier injected: buildServer must wire
+      // DiscordNotifier.fromEnv() into its default JobQueue.
+      const app = buildServer({ webhookSecret: secret, config });
+      const res = await postWebhook(app, payload);
+      expect(res.statusCode).toBe(202);
+      // The stub handler marks the job NEEDS_HUMAN_REVIEW, which must
+      // produce a needs_review Discord notification via the default wiring.
+      await new Promise((r) => setTimeout(r, 100));
+      expect(fetchSpy).toHaveBeenCalled();
+      for (const call of fetchSpy.mock.calls) {
+        expect(call[0]).toBe(url);
+      }
+      const embeds = fetchSpy.mock.calls.map(
+        (call) => JSON.parse((call[1] as RequestInit).body as string).embeds[0],
+      );
+      expect(
+        embeds.some((e: { title: string }) =>
+          /needs human review/i.test(e.title),
+        ),
+      ).toBe(true);
+    } finally {
+      delete process.env.DISCORD_WEBHOOK_URL;
+      vi.unstubAllGlobals();
+    }
   });
 });

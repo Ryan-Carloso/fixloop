@@ -210,6 +210,34 @@ describe("runSetup discord webhook", () => {
     const env = readFileSync(join(dir, ".env"), "utf8");
     expect(env).not.toContain("DISCORD_WEBHOOK_URL");
   });
+
+  it("registers the Discord webhook URL for output scrubbing", async () => {
+    // The wizard echoes the public URL in its post-Discord summary. Answering
+    // the public URL prompt with the Discord URL simulates a future say()
+    // that interpolates the credential: it proves the URL collected at the
+    // Discord prompt is registered in the scrub list (defense-in-depth).
+    // Only output printed after the Discord prompt is asserted — output from
+    // before the prompt cannot be scrubbed against a secret collected later.
+    const lines: string[] = [];
+    const dir = makeDir();
+    const answers = happyPathAnswers();
+    answers[3] = DISCORD_URL; // public URL — echoed in the summary
+    answers[answers.length - 3] = DISCORD_URL; // discord webhook URL
+    const result = await runSetup({
+      dir,
+      prompter: new FakePrompter(answers),
+      commandRunner: fakeCommandRunner(),
+      docker: fakeDocker(),
+      createGitHubApi: () => fakeGitHub(),
+      output: (l) => lines.push(l),
+      generateToken: () => "fixed-webhook-token-abcdef123456",
+      startServer: async () => true,
+    });
+    expect(result.saved).toBe(true);
+    const summaryStart = lines.findIndex((l) => l === "Configuration");
+    expect(summaryStart).toBeGreaterThanOrEqual(0);
+    assertNoSecrets(lines.slice(summaryStart).join("\n"), [DISCORD_URL]);
+  });
 });
 
 describe("runSetup existing configuration", () => {
