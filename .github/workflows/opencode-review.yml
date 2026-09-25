@@ -17,10 +17,11 @@ name: opencode-review
 # Why pull_request_target:
 # - GitHub does NOT pass secrets to `pull_request` workflows from forks, so
 #   the ZAI_API_KEY check would always skip on fork PRs.
-# - `pull_request_target` runs in the base repo context WITH secrets, and the
-#   checkout step below explicitly checks out the PR head.
-# - This is safe here: the workflow never executes PR code — it only reads
-#   the diff (`gh pr diff`) and posts a comment.
+# - `pull_request_target` runs in the base repo context WITH secrets. The
+#   checkout below is the BASE commit (trusted) — fork code is never
+#   checked out: the diff under review is fetched via the GitHub API
+#   (`gh pr diff`), so the agentic review step, which holds ZAI_API_KEY in
+#   its environment, never runs with fork-controlled files on disk.
 #
 # Setup:
 # 1. Add the `ZAI_API_KEY` secret (usable with both z.ai API endpoints).
@@ -52,12 +53,17 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - name: Checkout PR head
+      - name: Checkout base repository (trusted context)
         uses: actions/checkout@v6
         with:
           persist-credentials: false
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
+          # NOTE: do NOT check out the PR head here. In pull_request_target
+          # workflows, checking out fork code requires the
+          # allow-unsafe-pr-checkout opt-in, which would place
+          # fork-controlled files in the working directory of the agentic
+          # OpenCode review step below — and that step holds ZAI_API_KEY in
+          # its environment. The PR diff is fetched via the GitHub API
+          # instead, so fork code is never checked out or executed.
 
       - name: Check for z.ai API key
         id: check
