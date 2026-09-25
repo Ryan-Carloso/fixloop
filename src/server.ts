@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { findRepository, loadConfig, type FixLoopConfig } from "./config/config.js";
 import {
@@ -66,13 +66,12 @@ export interface ServerDeps {
 }
 
 function tokensEqual(a: string, b: string): boolean {
-  // Compare byte lengths, not string lengths: timingSafeEqual throws when
-  // the buffers differ in size, and a multibyte char makes UTF-8 byte
-  // length differ from JS string length.
-  const aBuf = Buffer.from(a);
-  const bBuf = Buffer.from(b);
-  if (aBuf.length !== bBuf.length) return false;
-  return timingSafeEqual(aBuf, bBuf);
+  // Hash both sides before comparing so the comparison is constant-size:
+  // timingSafeEqual throws on unequal buffer lengths, and an early
+  // length check would leak the secret's length through timing instead.
+  const digest = (s: string) =>
+    createHash("sha256").update(s, "utf8").digest();
+  return timingSafeEqual(digest(a), digest(b));
 }
 
 type AuthCheck = { ok: true } | { ok: false; status: 401; error: string };
@@ -82,6 +81,10 @@ type AuthCheck = { ok: true } | { ok: false; status: 401; error: string };
  * /jobs endpoints serve raw error diagnostics (errorContext straight from
  * the provider payload), so they require the same token as the webhook
  * ingest — never serve them open on a 0.0.0.0-bound server.
+ *
+ * Invoked by the default-deny preHandler hook in buildServer(), not by
+ * each route: the hook reads the route's config, so a future route added
+ * without thinking about auth is denied instead of silently public.
  *
  * The token travels as the X-FixLoop-Webhook-Token header. The webhook
  * ingest route additionally accepts ?token= (some webhook senders cannot
@@ -106,9 +109,17 @@ function checkAuth(
   }
   const headerToken = req.headers["x-fixloop-webhook-token"];
   const queryToken = (req.query as { token?: unknown }).token;
+  const rawHeader = Array.isArray(headerToken) ? headerToken[0] : headerToken;
+  // An empty header counts as absent: some proxies/clients send the header
+  // blank, which must not shadow a valid ?token= fallback on the webhook
+  // route.
+  const header =
+    typeof rawHeader === "string" && rawHeader !== "" ? rawHeader : undefined;
   const provided =
-    (Array.isArray(headerToken) ? headerToken[0] : headerToken) ??
-    (opts.allowQueryToken === true && typeof queryToken === "string"
+    header ??
+    (opts.allowQueryToken === true &&
+    typeof queryToken === "string" &&
+    queryToken !== ""
       ? queryToken
       : undefined);
   if (typeof provided !== "string" || !tokensEqual(provided, secret)) {
@@ -159,13 +170,34 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
       deps.notifier ?? DiscordNotifier.fromEnv(),
     );
 
-  app.get("/health", async () => ({ ok: true, version: FIXLOOP_VERSION }));
+  app.get(
+    "/health",
+    { config: { public: true } },
+    async () => ({ ok: true, version: FIXLOOP_VERSION }),
+  );
 
-  app.get("/jobs", async (req, reply) => {
-    const auth = checkAuth(req, deps);
+  // Default-deny auth: every route requires the webhook token unless its
+  // route config marks it public. A preHandler hook (runs after routing,
+  // so req.routeOptions.config is available) instead of per-route
+  // checkAuth() calls, so a future route added without thinking about
+  // auth is denied instead of silently public. Query-token auth stays
+  // opt-in per route via config (allowQueryToken) so a future route
+  // cannot re-introduce the ?token= log-leak by forgetting the flag.
+  app.addHook("preHandler", async (req, reply) => {
+    const routeConfig = (req.routeOptions.config ?? {}) as {
+      public?: boolean;
+      allowQueryToken?: boolean;
+    };
+    if (routeConfig.public === true) return;
+    const auth = checkAuth(req, deps, {
+      allowQueryToken: routeConfig.allowQueryToken === true,
+    });
     if (!auth.ok) {
       return reply.status(auth.status).send({ error: auth.error });
     }
+  });
+
+  app.get("/jobs", async (req, reply) => {
     const { status } = req.query as { status?: unknown };
     // An empty ?status= means "no filter" (generated clients); only a
     // non-empty unknown value is a 400.
@@ -178,21 +210,16 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   });
 
   app.get("/jobs/:id", async (req, reply) => {
-    const auth = checkAuth(req, deps);
-    if (!auth.ok) {
-      return reply.status(auth.status).send({ error: auth.error });
-    }
     const { id } = req.params as { id: string };
     const job = store.get(id);
     if (!job) return reply.status(404).send({ error: "job not found" });
     return job;
   });
 
-  app.post("/webhooks/bugsink", async (req, reply) => {
-    const auth = checkAuth(req, deps, { allowQueryToken: true });
-    if (!auth.ok) {
-      return reply.status(auth.status).send({ error: auth.error });
-    }
+  app.post(
+    "/webhooks/bugsink",
+    { config: { allowQueryToken: true } },
+    async (req, reply) => {
 
     try {
       const ctx = await bugsink.parse(req.body);
@@ -309,17 +336,23 @@ export function registerShutdown(
     }
     shuttingDown = true;
     void (async () => {
+      let timer: NodeJS.Timeout | undefined;
       try {
         await Promise.race([
           (async () => {
             await deps.beforeClose?.();
           })(),
-          new Promise((resolve) =>
-            setTimeout(resolve, beforeCloseTimeoutMs),
-          ),
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, beforeCloseTimeoutMs);
+          }),
         ]);
       } catch {
         // Non-fatal: the flush must still run.
+      } finally {
+        // Clear the bound timer once the race settles: without this it
+        // keeps the event loop alive for the full timeout even after
+        // beforeClose finished fast.
+        if (timer !== undefined) clearTimeout(timer);
       }
       await store.close();
     })()
@@ -384,6 +417,14 @@ export async function main(
   // One notifier instance shared by the queue and the Postgres store:
   // crash recovery in hydrate() needs it to report restart-orphaned jobs.
   const notifier = DiscordNotifier.fromEnv();
+  if (!notifier.enabled) {
+    // Warn once at startup, not per notifier instance: fromEnv() stays
+    // silent so throwaway instances built by tests and library callers
+    // don't spam, and production builds exactly one notifier here.
+    console.warn(
+      "DISCORD_WEBHOOK_URL is not set or not a valid Discord webhook URL; Discord notifications are disabled.",
+    );
+  }
   const store = await resolveStore(process.env.DATABASE_URL, { notifier });
 
   let app: FastifyInstance;
@@ -411,11 +452,10 @@ export async function main(
       },
     });
   } else {
-    // Reuse the notifier built above: buildServer() would otherwise
-    // construct a second one, warning twice about the unset webhook URL.
-    // Thread deps.handleJob like the Postgres branch: buildServer()
-    // honors it, and dropping it here would silently run stubHandler
-    // instead of the caller's handler on the in-memory path.
+    // Reuse the notifier built above so crash recovery and the queue
+    // share one instance. Thread deps.handleJob like the Postgres branch:
+    // buildServer() honors it, and dropping it here would silently run
+    // stubHandler instead of the caller's handler on the in-memory path.
     app = buildServer({ config, notifier, handleJob: deps.handleJob });
   }
   await app.listen({ port, host });

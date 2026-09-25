@@ -160,4 +160,36 @@ describe("registerShutdown", () => {
     expect(close).toHaveBeenCalledTimes(1);
     expect(exitCode).toBe(0);
   });
+
+  it("clears the beforeClose timeout once the race settles", async () => {
+    // Without the clear, the bound timer keeps the event loop alive for
+    // the full timeout even after beforeClose finished fast (matters in
+    // tests and any host that stubs exit instead of dying).
+    const clear = vi.spyOn(globalThis, "clearTimeout");
+    const close = vi.fn(async () => {});
+    let exitCode: number | undefined;
+    const handlers = new Map<string, () => void>();
+    registerShutdown(
+      { close },
+      {
+        onSignal: (signal, handler) => {
+          handlers.set(signal, handler);
+        },
+        exit: (code) => {
+          exitCode = code;
+        },
+        beforeClose: async () => {}, // resolves immediately
+        beforeCloseTimeoutMs: 30_000, // long bound: a leaked timer shows
+      },
+    );
+    try {
+      handlers.get("SIGTERM")!();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(exitCode).toBe(0);
+      expect(clear).toHaveBeenCalled();
+    } finally {
+      clear.mockRestore();
+    }
+  });
 });

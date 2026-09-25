@@ -157,6 +157,30 @@ describe("webhook -> queue integration", () => {
     expect(res.json()).toEqual({ error: "invalid webhook token" });
   });
 
+  it("denies routes added without auth config by default (default-deny)", async () => {
+    // A future route that forgets its own checkAuth() call must not end up
+    // public: the preHandler hook in buildServer() denies everything that
+    // is not explicitly marked public.
+    const { app } = buildTestServer();
+    app.get("/future-route", async () => ({ ok: true }));
+    const res = await app.inject({ method: "GET", url: "/future-route" });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "invalid webhook token" });
+  });
+
+  it("treats an empty webhook-token header as absent so ?token= still works", async () => {
+    // Some proxies/clients send the header blank; that must not shadow a
+    // valid query-token fallback on the webhook route.
+    const { app } = buildTestServer();
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhooks/bugsink?token=${secret}`,
+      headers: { "x-fixloop-webhook-token": "" },
+      payload,
+    });
+    expect(res.statusCode).toBe(202);
+  });
+
   it("returns an indistinguishable 401 on the GET routes when no webhook secret is configured", async () => {
     // An anonymous prober must not be able to tell an unconfigured
     // deployment (no secret to steal) from a configured one: both answer
