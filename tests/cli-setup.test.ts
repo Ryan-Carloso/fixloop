@@ -76,6 +76,7 @@ function happyPathAnswers(): Array<string | boolean> {
     "anthropic/claude-sonnet-4-5", // model
     "fixloop-runner:latest", // runner image
     true, // run AI probe
+    "", // discord webhook URL (skip)
     true, // save configuration
     false, // start now
   ];
@@ -150,6 +151,7 @@ describe("runSetup happy path", () => {
         "anthropic/claude-sonnet-4-5",
         "fixloop-runner:latest",
         false, // skip AI probe
+        "", // discord webhook URL (skip)
         true, // save
         false, // start
       ]),
@@ -161,6 +163,80 @@ describe("runSetup happy path", () => {
     });
     expect(result.saved).toBe(true);
     expect(readFileSync(join(dir, "fixloop.config.yaml"), "utf8")).toContain("octocat/manual");
+  });
+});
+
+describe("runSetup discord webhook", () => {
+  const DISCORD_URL = "https://discord.com/api/webhooks/EXAMPLE";
+
+  /** happyPathAnswers with the Discord answer replaced (it sits third from last). */
+  function answersWithDiscord(discord: string): Array<string | boolean> {
+    const answers = happyPathAnswers();
+    answers[answers.length - 3] = discord;
+    return answers;
+  }
+
+  function runWizard(discord: string, lines: string[]) {
+    const dir = makeDir();
+    return runSetup({
+      dir,
+      prompter: new FakePrompter(answersWithDiscord(discord)),
+      commandRunner: fakeCommandRunner(),
+      docker: fakeDocker(),
+      createGitHubApi: () => fakeGitHub(),
+      output: (l) => lines.push(l),
+      generateToken: () => "fixed-webhook-token-abcdef123456",
+      startServer: async () => true,
+    }).then((result) => ({ dir, result }));
+  }
+
+  it("saves the Discord webhook URL to .env, never to YAML or output", async () => {
+    const lines: string[] = [];
+    const { dir, result } = await runWizard(DISCORD_URL, lines);
+    expect(result.saved).toBe(true);
+
+    const env = readFileSync(join(dir, ".env"), "utf8");
+    expect(env).toContain(`DISCORD_WEBHOOK_URL=${DISCORD_URL}`);
+
+    const yaml = readFileSync(join(dir, "fixloop.config.yaml"), "utf8");
+    expect(yaml).not.toContain(DISCORD_URL);
+
+    assertNoSecrets(lines.join("\n"), [DISCORD_URL]);
+  });
+
+  it("omits DISCORD_WEBHOOK_URL when skipped with an empty answer", async () => {
+    const { dir, result } = await runWizard("", []);
+    expect(result.saved).toBe(true);
+    const env = readFileSync(join(dir, ".env"), "utf8");
+    expect(env).not.toContain("DISCORD_WEBHOOK_URL");
+  });
+
+  it("registers the Discord webhook URL for output scrubbing", async () => {
+    // The wizard echoes the public URL in its post-Discord summary. Answering
+    // the public URL prompt with the Discord URL simulates a future say()
+    // that interpolates the credential: it proves the URL collected at the
+    // Discord prompt is registered in the scrub list (defense-in-depth).
+    // Only output printed after the Discord prompt is asserted — output from
+    // before the prompt cannot be scrubbed against a secret collected later.
+    const lines: string[] = [];
+    const dir = makeDir();
+    const answers = happyPathAnswers();
+    answers[3] = DISCORD_URL; // public URL — echoed in the summary
+    answers[answers.length - 3] = DISCORD_URL; // discord webhook URL
+    const result = await runSetup({
+      dir,
+      prompter: new FakePrompter(answers),
+      commandRunner: fakeCommandRunner(),
+      docker: fakeDocker(),
+      createGitHubApi: () => fakeGitHub(),
+      output: (l) => lines.push(l),
+      generateToken: () => "fixed-webhook-token-abcdef123456",
+      startServer: async () => true,
+    });
+    expect(result.saved).toBe(true);
+    const summaryStart = lines.findIndex((l) => l === "Configuration");
+    expect(summaryStart).toBeGreaterThanOrEqual(0);
+    assertNoSecrets(lines.slice(summaryStart).join("\n"), [DISCORD_URL]);
   });
 });
 

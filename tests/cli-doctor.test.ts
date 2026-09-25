@@ -192,4 +192,57 @@ describe("runDoctor", () => {
     await runDoctor(d);
     expect(readdirSync(dir).sort()).toEqual(before);
   });
+
+  it("skips the Discord webhook check when DISCORD_WEBHOOK_URL is unset", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "fixloop-doctor-"));
+    writeInstall(dir);
+    const { deps: d } = deps(dir);
+    const result = await runDoctor(d);
+    expect(result.checks.find((c) => c.name === "Discord webhook")).toBeUndefined();
+  });
+
+  it("reports the Discord webhook reachable when the URL answers 200", async () => {
+    const discordUrl = "https://discord.com/api/webhooks/EXAMPLE";
+    const dir = mkdtempSync(join(tmpdir(), "fixloop-doctor-"));
+    writeInstall(dir, YAML, `${ENV}DISCORD_WEBHOOK_URL=${discordUrl}\n`);
+    const { lines, deps: d } = deps(dir);
+    const result = await runDoctor(d);
+    const check = result.checks.find((c) => c.name === "Discord webhook")!;
+    expect(check.ok).toBe(true);
+    assertNoSecrets(lines.join("\n"), [discordUrl]);
+  });
+
+  it("flags a Discord webhook URL that does not answer 200", async () => {
+    const discordUrl = "https://discord.com/api/webhooks/EXAMPLE";
+    const dir = mkdtempSync(join(tmpdir(), "fixloop-doctor-"));
+    writeInstall(dir, YAML, `${ENV}DISCORD_WEBHOOK_URL=${discordUrl}\n`);
+    const { deps: d } = deps(dir, {
+      http: (async (url: string) => {
+        if (String(url).includes("discord.com")) return { ok: false, status: 404 };
+        return { ok: true, status: 200 };
+      }) as unknown as typeof fetch,
+    });
+    const result = await runDoctor(d);
+    const check = result.checks.find((c) => c.name === "Discord webhook")!;
+    expect(check.ok).toBe(false);
+    expect(check.hint).toMatch(/DISCORD_WEBHOOK_URL/);
+  });
+
+  it("reports the Discord webhook unreachable when the request throws", async () => {
+    const discordUrl = "https://discord.com/api/webhooks/EXAMPLE";
+    const dir = mkdtempSync(join(tmpdir(), "fixloop-doctor-"));
+    writeInstall(dir, YAML, `${ENV}DISCORD_WEBHOOK_URL=${discordUrl}\n`);
+    const { lines, deps: d } = deps(dir, {
+      http: (async (url: string) => {
+        if (String(url).includes("discord.com"))
+          throw new Error("getaddrinfo ENOTFOUND discord.com");
+        return { ok: true, status: 200 };
+      }) as unknown as typeof fetch,
+    });
+    const result = await runDoctor(d);
+    const check = result.checks.find((c) => c.name === "Discord webhook")!;
+    expect(check.ok).toBe(false);
+    expect(check.hint).toMatch(/DISCORD_WEBHOOK_URL/);
+    assertNoSecrets(lines.join("\n"), [discordUrl]);
+  });
 });

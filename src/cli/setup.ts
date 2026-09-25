@@ -374,6 +374,14 @@ export async function runSetup(deps: SetupDeps = {}): Promise<SetupResult> {
       say("Verify manually with: docker run --rm <image> opencode run --model <model> 'Reply with exactly: OK'");
     }
 
+    // Discord notifications (optional).
+    say("");
+    const discordWebhookUrl = (
+      await prompter.password("Discord webhook URL (optional, Enter to skip):")
+    ).trim();
+    // Register for output scrubbing like every other collected secret.
+    if (discordWebhookUrl) secrets.push(discordWebhookUrl);
+
     // Secret-free summary + save.
     say("");
     say("Configuration");
@@ -404,6 +412,7 @@ export async function runSetup(deps: SetupDeps = {}): Promise<SetupResult> {
       webhookSecret,
       githubToken,
       aiApiKey,
+      ...(discordWebhookUrl ? { discordWebhookUrl } : {}),
     };
     const { backups } = saveInstall(dir, config, wizardSecrets);
     if (!aiProvider.builtin) {

@@ -1,4 +1,4 @@
-import { sanitizeForPr } from "../fixloop.js";
+import { sanitizeForPr } from "../redact.js";
 
 /**
  * Redact secret-looking patterns from arbitrary text (logs, summaries,

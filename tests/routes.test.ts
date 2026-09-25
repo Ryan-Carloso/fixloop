@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { buildServer } from "../src/server.js";
+import { describe, expect, it, vi } from "vitest";
+import { buildServer, redactTokenFromUrl } from "../src/server.js";
 import { JobQueue, JobStore, type JobHandler } from "../src/jobs/jobs.js";
 import type { FixLoopConfig } from "../src/config/config.js";
 
@@ -58,7 +58,11 @@ describe("webhook -> queue integration", () => {
     expect(body.deduped).toBe(false);
     expect(typeof body.jobId).toBe("string");
 
-    const jobRes = await app.inject({ method: "GET", url: `/jobs/${body.jobId}` });
+    const jobRes = await app.inject({
+      method: "GET",
+      url: `/jobs/${body.jobId}`,
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(jobRes.statusCode).toBe(200);
     expect(jobRes.json()).toMatchObject({
       id: body.jobId,
@@ -96,16 +100,273 @@ describe("webhook -> queue integration", () => {
     const { app } = buildTestServer();
     await postWebhook(app, payload);
     await postWebhook(app, { ...payload, id: "aaaaaaaa-0000-0000-0000-000000000000" });
-    const res = await app.inject({ method: "GET", url: "/jobs" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(res.statusCode).toBe(200);
     const jobs = res.json();
     expect(jobs).toHaveLength(2);
     expect(jobs[0].issueId).toBe("aaaaaaaa-0000-0000-0000-000000000000");
   });
 
+  it("treats an empty ?status= as no filter", async () => {
+    const { app } = buildTestServer();
+    await postWebhook(app, payload);
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs?status=",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toHaveLength(1);
+  });
+
+  it("requires the webhook token for GET /jobs", async () => {
+    const { app } = buildTestServer();
+    await postWebhook(app, payload);
+    const noToken = await app.inject({ method: "GET", url: "/jobs" });
+    expect(noToken.statusCode).toBe(401);
+    expect(noToken.json()).toEqual({ error: "invalid webhook token" });
+    const wrongToken = await app.inject({
+      method: "GET",
+      url: "/jobs",
+      headers: { "x-fixloop-webhook-token": "wrong" },
+    });
+    expect(wrongToken.statusCode).toBe(401);
+  });
+
+  it("requires the webhook token for GET /jobs/:id", async () => {
+    const { app } = buildTestServer();
+    const created = (await postWebhook(app, payload)).json();
+    const noToken = await app.inject({
+      method: "GET",
+      url: `/jobs/${created.jobId}`,
+    });
+    expect(noToken.statusCode).toBe(401);
+  });
+
+  it("rejects ?token= on the GET routes (the secret would land in request logs)", async () => {
+    const { app } = buildTestServer();
+    const res = await app.inject({
+      method: "GET",
+      url: `/jobs?token=${secret}`,
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "invalid webhook token" });
+  });
+
+  it("denies routes added without auth config by default (default-deny)", async () => {
+    // A future route that forgets its own checkAuth() call must not end up
+    // public: the preHandler hook in buildServer() denies everything that
+    // is not explicitly marked public.
+    const { app } = buildTestServer();
+    app.get("/future-route", async () => ({ ok: true }));
+    const res = await app.inject({ method: "GET", url: "/future-route" });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "invalid webhook token" });
+  });
+
+  it("treats an empty webhook-token header as absent so ?token= still works", async () => {
+    // Some proxies/clients send the header blank; that must not shadow a
+    // valid query-token fallback on the webhook route.
+    const { app } = buildTestServer();
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhooks/bugsink?token=${secret}`,
+      headers: { "x-fixloop-webhook-token": "" },
+      payload,
+    });
+    expect(res.statusCode).toBe(202);
+  });
+
+  it("returns an indistinguishable 401 on the GET routes when no webhook secret is configured", async () => {
+    // An anonymous prober must not be able to tell an unconfigured
+    // deployment (no secret to steal) from a configured one: both answer
+    // exactly like a wrong token. The misconfiguration is logged
+    // server-side once at startup instead.
+    const previous = process.env.FIXLOOP_WEBHOOK_SECRET;
+    delete process.env.FIXLOOP_WEBHOOK_SECRET;
+    try {
+      const app = buildServer({ config });
+      const list = await app.inject({ method: "GET", url: "/jobs" });
+      expect(list.statusCode).toBe(401);
+      expect(list.json()).toEqual({ error: "invalid webhook token" });
+      const one = await app.inject({ method: "GET", url: "/jobs/abc" });
+      expect(one.statusCode).toBe(401);
+      expect(one.json()).toEqual({ error: "invalid webhook token" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.FIXLOOP_WEBHOOK_SECRET;
+      } else {
+        process.env.FIXLOOP_WEBHOOK_SECRET = previous;
+      }
+    }
+  });
+
+  it("warns once at buildServer, not per request, when the secret is unset", async () => {
+    const previous = process.env.FIXLOOP_WEBHOOK_SECRET;
+    delete process.env.FIXLOOP_WEBHOOK_SECRET;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const app = buildServer({ config });
+      const first = await app.inject({ method: "GET", url: "/jobs" });
+      expect(first.statusCode).toBe(401);
+      const second = await app.inject({ method: "GET", url: "/jobs/abc" });
+      expect(second.statusCode).toBe(401);
+      // One startup warning, not one per rejected request: the secret is
+      // static per process, so per-request warnings would let
+      // unauthenticated outsiders flood the logs. (The Discord "not set"
+      // warning is unrelated and pre-existing.)
+      const secretWarns = () =>
+        warn.mock.calls.filter((c) =>
+          String(c[0]).includes("webhook secret not configured"),
+        ).length;
+      expect(secretWarns()).toBe(1);
+    } finally {
+      warn.mockRestore();
+      if (previous === undefined) {
+        delete process.env.FIXLOOP_WEBHOOK_SECRET;
+      } else {
+        process.env.FIXLOOP_WEBHOOK_SECRET = previous;
+      }
+    }
+  });
+
   it("returns 404 for an unknown job id", async () => {
     const { app } = buildTestServer();
-    const res = await app.inject({ method: "GET", url: "/jobs/does-not-exist" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs/does-not-exist",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
     expect(res.statusCode).toBe(404);
+  });
+
+  it("filters jobs via GET /jobs?status=", async () => {
+    const { app } = buildTestServer();
+    await postWebhook(app, payload);
+    await postWebhook(app, { ...payload, id: "aaaaaaaa-0000-0000-0000-000000000000" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs?status=QUEUED",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
+    expect(res.statusCode).toBe(200);
+    // The blocking test handler keeps the first job RUNNING; only the
+    // second stays QUEUED (concurrency 1).
+    expect(res.json()).toHaveLength(1);
+    expect(res.json()[0].issueId).toBe("aaaaaaaa-0000-0000-0000-000000000000");
+    const none = await app.inject({
+      method: "GET",
+      url: "/jobs?status=FAILED",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
+    expect(none.statusCode).toBe(200);
+    expect(none.json()).toHaveLength(0);
+  });
+
+  it("returns 400 for an unknown ?status= value", async () => {
+    const { app } = buildTestServer();
+    const res = await app.inject({
+      method: "GET",
+      url: "/jobs?status=BOGUS",
+      headers: { "x-fixloop-webhook-token": secret },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
+
+describe("default Discord notifier wiring", () => {
+  it("notifies through DiscordNotifier.fromEnv() in the default queue", async () => {
+    const url = "https://discord.com/api/webhooks/123/serverwiring";
+    const previousWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
+    process.env.DISCORD_WEBHOOK_URL = url;
+    const fetchSpy = vi.fn(async () => ({ ok: true, status: 204 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      // No queue/notifier injected: buildServer must wire
+      // DiscordNotifier.fromEnv() into its default JobQueue.
+      const app = buildServer({ webhookSecret: secret, config });
+      const res = await postWebhook(app, payload);
+      expect(res.statusCode).toBe(202);
+      // The stub handler marks the job NEEDS_HUMAN_REVIEW, which must
+      // produce a needs_review Discord notification via the default wiring.
+      // Poll instead of a fixed sleep: queue processing time varies.
+      for (let i = 0; i < 100 && fetchSpy.mock.calls.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(fetchSpy).toHaveBeenCalled();
+      for (const call of fetchSpy.mock.calls) {
+        expect(call[0]).toBe(url);
+      }
+      const embeds = fetchSpy.mock.calls.map(
+        (call) => JSON.parse((call[1] as RequestInit).body as string).embeds[0],
+      );
+      expect(
+        embeds.some((e: { title: string }) =>
+          /needs human review/i.test(e.title),
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousWebhookUrl === undefined) {
+        delete process.env.DISCORD_WEBHOOK_URL;
+      } else {
+        process.env.DISCORD_WEBHOOK_URL = previousWebhookUrl;
+      }
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("redactTokenFromUrl", () => {
+  it("redacts the token query parameter", () => {
+    expect(redactTokenFromUrl("/webhooks/bugsink?token=supersecret")).toBe(
+      "/webhooks/bugsink?token=[redacted]",
+    );
+  });
+
+  it("redacts the token among other query parameters", () => {
+    expect(redactTokenFromUrl("/jobs?status=FAILED&token=abc&x=1")).toBe(
+      "/jobs?status=FAILED&token=[redacted]&x=1",
+    );
+  });
+
+  it("leaves URLs without a token untouched", () => {
+    expect(redactTokenFromUrl("/jobs?status=FAILED")).toBe(
+      "/jobs?status=FAILED",
+    );
+    expect(redactTokenFromUrl("/health")).toBe("/health");
+  });
+});
+
+describe("redactTokenFromUrl percent-encoded keys", () => {
+  it("redacts a percent-encoded token parameter name (%74oken=)", () => {
+    // Fastify decodes parameter names, so ?%74oken=<secret> authenticates
+    // as token= while the raw logged URL hides from a literal match.
+    expect(redactTokenFromUrl("/webhooks/bugsink?%74oken=supersecret")).toBe(
+      "/webhooks/bugsink?token=[redacted]",
+    );
+  });
+
+  it("still redacts when only part of the name is encoded", () => {
+    expect(redactTokenFromUrl("/webhooks/bugsink?tok%65n=abc")).toBe(
+      "/webhooks/bugsink?token=[redacted]",
+    );
+  });
+
+  it("leaves malformed percent sequences untouched rather than throwing", () => {
+    expect(redactTokenFromUrl("/jobs?status=%zz")).toBe("/jobs?status=%zz");
+  });
+});
+
+describe("redactTokenFromUrl two-pass redaction", () => {
+  it("redacts a token value containing an encoded separator without leaking the tail", () => {
+    // Decoding first would split ?token=a%26b into ?token=a&b and leave
+    // the tail "b" in the logs. The raw pass must consume the whole value.
+    expect(redactTokenFromUrl("/webhooks/bugsink?token=a%26b")).toBe(
+      "/webhooks/bugsink?token=[redacted]",
+    );
   });
 });

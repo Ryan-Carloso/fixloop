@@ -4,6 +4,10 @@ import type { ErrorContext } from "./providers/error-provider.js";
 import type { GitHubClient } from "./github/client.js";
 import { RepairWorkflow } from "./workflow/repair.js";
 import { VerificationGate } from "./verify/gate.js";
+import { sanitizeForPr } from "./redact.js";
+// Re-exported so existing importers keep working; new code should import
+// from ./redact.js directly (leaf module, no orchestrator dependency).
+export { sanitizeForPr };
 
 export interface FixLoopOptions {
   repoUrl: string;
@@ -17,28 +21,6 @@ export interface FixLoopOutcome {
   prCreated: boolean;
   prUrl?: string;
   reason?: string;
-}
-
-/**
- * Sanitizes an error message for inclusion in a public PR body.
- * Redacts patterns that look like secrets (API keys, tokens, passwords).
- */
-export function sanitizeForPr(text: string): string {
-  return (
-    text
-      // API keys, tokens, secrets (common prefixes).
-      .replace(
-        /\b(sk-[a-zA-Z0-9_-]{10,}|ghp_[a-zA-Z0-9]{10,}|gho_[a-zA-Z0-9]{10,}|xox[bap]-[a-zA-Z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g,
-        "[REDACTED]",
-      )
-      // Generic key=value with secret-like keys.
-      .replace(
-        /\b(api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*['"]?[^'"\s,;]+['"]?/gi,
-        "$1=[REDACTED]",
-      )
-      // Bearer tokens.
-      .replace(/\bBearer\s+[a-zA-Z0-9._-]{10,}\b/g, "Bearer [REDACTED]")
-  );
 }
 
 /**

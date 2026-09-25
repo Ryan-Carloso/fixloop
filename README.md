@@ -147,13 +147,40 @@ Environment variables:
 - `FIXLOOP_PORT`: API port (default `3000`).
 - `FIXLOOP_HOST`: API bind address (default `0.0.0.0`).
 - `FIXLOOP_CONFIG`: Path to the config file (default `fixloop.config.yaml`).
+- `DATABASE_URL`: Postgres connection string (e.g.
+  `postgres://user:pass@localhost:5432/fixloop`). When set, jobs are
+  persisted to Postgres so history survives restarts; the schema is applied
+  automatically on boot and the server exits if the database is unreachable.
+  One instance per database: boot takes a Postgres advisory lock, and a
+  second process against the same `DATABASE_URL` refuses to start, because
+  crash recovery rewrites transient rows and two writers would corrupt
+  each other. When unset, FixLoop keeps the in-memory store (zero-config
+  dev mode).
+- `DISCORD_WEBHOOK_URL`: Discord webhook URL for repair notifications
+  (repair started, fix PR created, repair failed, repair needs human
+  review). Optional — when unset, notifications are silently disabled.
+  Collected by `fixloop setup` (stored in the install `.env` file, never
+  in the YAML config). Note: the current stub repair handler never
+  produces a verified fix, so every accepted webhook yields two messages
+  (started + needs review) until a real repair pipeline lands.
 
 ## API Endpoints
 
 - `GET /health`: Health check.
 - `POST /webhooks/bugsink`: BugSink error webhook.
-- `GET /jobs`: List repair jobs.
+- `GET /jobs`: List repair jobs (newest first; optional `?status=` filter,
+  e.g. `?status=FAILED`).
 - `GET /jobs/:id`: Get job status.
+
+The `/jobs` endpoints serve raw error diagnostics, so they require the
+pre-shared webhook token: send it as the `X-FixLoop-Webhook-Token` header
+(`401 {"error":"invalid webhook token"}` without it). The token is
+deliberately not accepted as `?token=` on these routes — the server logs
+the full request URL. When `FIXLOOP_WEBHOOK_SECRET` is unset the endpoints
+(and the webhook ingest) fail closed with the same
+`401 {"error":"invalid webhook token"}` a wrong token gets, so an
+anonymous prober cannot tell an unconfigured deployment from a configured
+one; the misconfiguration is logged server-side once at startup.
 
 ## MVP Limitations
 
@@ -162,6 +189,7 @@ Environment variables:
 - **GitHub**: File deletions not supported (MVP limitation). The PR uses the Git Data API (blobs → tree → commit → ref).
 - **BugSink**: Uses a shared webhook token (BugSink doesn't provide HMAC signing for issue webhooks).
 - **Scale**: Single VPS, in-process queue, concurrency 1. No Redis, no Kubernetes.
+- **History retention**: With `DATABASE_URL` set, boot hydrates at most the newest 1000 jobs (`HYDRATE_ROW_LIMIT` in `src/db/postgres.ts`); older rows stay in Postgres but are invisible to the API until pruned manually. No automatic retention/pruning yet — follow-up work.
 
 ## Security
 

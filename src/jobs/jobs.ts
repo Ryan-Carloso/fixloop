@@ -1,16 +1,29 @@
 import { randomUUID } from "node:crypto";
+import { sanitizeForPr } from "../redact.js";
 import type { ErrorContext } from "../providers/error-provider.js";
+import type { DiscordEvent, DiscordJobRef, JobNotifier } from "../notify/discord.js";
 
-export type JobStatus =
-  | "QUEUED"
-  | "RUNNING"
-  | "REPRODUCING"
-  | "FIXING"
-  | "VERIFYING"
-  | "PR_CREATED"
-  | "NEEDS_HUMAN_REVIEW"
-  | "FAILED"
-  | "TIMED_OUT";
+export const JOB_STATUSES = [
+  "QUEUED",
+  "RUNNING",
+  "REPRODUCING",
+  "FIXING",
+  "VERIFYING",
+  "PR_CREATED",
+  "NEEDS_HUMAN_REVIEW",
+  "FAILED",
+  "TIMED_OUT",
+] as const;
+
+export type JobStatus = (typeof JOB_STATUSES)[number];
+
+/** True when the value is a known job status (used to validate ?status=). */
+export function isJobStatus(value: unknown): value is JobStatus {
+  return (
+    typeof value === "string" &&
+    (JOB_STATUSES as readonly string[]).includes(value)
+  );
+}
 
 export interface Job {
   id: string;
@@ -23,6 +36,8 @@ export interface Job {
   status: JobStatus;
   errorContext: ErrorContext;
   note?: string;
+  /** URL of the fix PR, set when the repair produces a pull request. */
+  prUrl?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -35,6 +50,20 @@ export const ACTIVE_STATUSES: ReadonlySet<JobStatus> = new Set([
   "FIXING",
   "VERIFYING",
   "PR_CREATED",
+]);
+
+/**
+ * Statuses a job never leaves. The pipeline is over; a late transition
+ * (e.g. a handler throwing after it already recorded PR_CREATED) is a
+ * bug, not an update. updateStatus ignores it and returns undefined, so
+ * no contradictory notification fires and dedup is never unblocked by
+ * accident.
+ */
+export const TERMINAL_STATUSES: ReadonlySet<JobStatus> = new Set([
+  "PR_CREATED",
+  "NEEDS_HUMAN_REVIEW",
+  "FAILED",
+  "TIMED_OUT",
 ]);
 
 export function dedupKey(
@@ -61,9 +90,17 @@ export class JobStore {
     return this.jobs.get(id);
   }
 
-  list(): Job[] {
-    return [...this.jobs.values()].sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt),
+  list(status?: JobStatus): Job[] {
+    // Filter before sorting: with a status filter the excluded jobs would
+    // otherwise be sorted for nothing, at O(total) instead of O(matched).
+    const jobs = [...this.jobs.values()].filter(
+      (job) => !status || job.status === status,
+    );
+    return jobs.sort((a, b) =>
+      // Byte-wise on ISO-8601 UTC strings (chronological when the format
+      // is fixed-width like Date.toISOString()): localeCompare() would
+      // make the order depend on the runtime's ICU data.
+      a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0,
     );
   }
 
@@ -74,9 +111,41 @@ export class JobStore {
   ): Job | undefined {
     const job = this.jobs.get(id);
     if (!job) return undefined;
+    // Sanitize here — the single sink — so every caller (the queue, crash
+    // recovery, future direct users) gets redacted notes in the store, the
+    // DB write-behind, the API, Discord, and the terminal-guard log below.
+    const cleanPatch =
+      patch?.note === undefined
+        ? patch
+        : { ...patch, note: sanitizeForPr(patch.note) };
+    if (job.status === status) {
+      // Idempotent re-entry (e.g. a handler attaching prUrl after the
+      // terminal PR_CREATED transition): apply the patch instead of
+      // warning about an invalid transition and dropping it. No
+      // notification — runOne's update wrapper only notifies on actual
+      // status changes.
+      job.updatedAt = new Date().toISOString();
+      if (cleanPatch) Object.assign(job, cleanPatch);
+      return job;
+    }
+    if (TERMINAL_STATUSES.has(job.status)) {
+      // Late transition out of a terminal state: ignore it (see
+      // TERMINAL_STATUSES). Returning undefined keeps the caller's
+      // no-change path (no notification, no write-behind). Include the
+      // note when present: a handler that throws after reaching a
+      // terminal state would otherwise lose its error entirely.
+      const note =
+        typeof cleanPatch?.note === "string" && cleanPatch.note.length > 0
+          ? `: ${cleanPatch.note}`
+          : "";
+      console.warn(
+        `ignoring transition of job ${id} from terminal status ${job.status} to ${status}${note}`,
+      );
+      return undefined;
+    }
     job.status = status;
     job.updatedAt = new Date().toISOString();
-    if (patch) Object.assign(job, patch);
+    if (cleanPatch) Object.assign(job, cleanPatch);
     return job;
   }
 
@@ -106,31 +175,78 @@ export interface EnqueueResult {
 export class JobQueue {
   private pending: string[] = [];
   private activeCount = 0;
+  /** Promises of the currently executing runOne() calls. */
+  private readonly inFlight = new Set<Promise<void>>();
+  /** Set by stop(): no new repairs start after this. */
+  private stopped = false;
 
   constructor(
     private readonly store: JobStore,
     private readonly handler: JobHandler,
     private readonly concurrency = 1,
+    private readonly notifier?: JobNotifier,
   ) {}
 
   enqueue(job: Job): EnqueueResult {
     const existing = this.store.findActiveByDedupKey(job.dedupKey);
-    if (existing) return { accepted: false, deduped: true, job: existing };
+    if (existing) {
+      if (this.stopped) {
+        // While quiescing, a dedup hit must 503 like a fresh job: the
+        // sender's first attempt got 503 (persisted, no repair started in
+        // this process), so answering 202 here would end its retry cycle
+        // and the repair would be silently lost.
+        return { accepted: false, deduped: false, job: existing };
+      }
+      return { accepted: false, deduped: true, job: existing };
+    }
     this.store.create(job);
+    if (this.stopped) {
+      // The queue is quiescing for shutdown: persist the job so crash
+      // recovery picks it up on the next boot (with the Postgres store;
+      // the in-memory store is best-effort and the job dies with the
+      // process), but don't start a repair in this process — pump()
+      // won't pick it up, so the caller must not be told it was
+      // accepted. (The webhook route maps this to 503.)
+      return { accepted: false, deduped: false, job };
+    }
     this.pending.push(job.id);
     void this.pump();
     return { accepted: true, deduped: false, job };
   }
 
+  /**
+   * Quiesces the queue for shutdown: no new repairs start, and the
+   * returned promise settles once the active handlers finish, so their
+   * final transitions land in the store before the caller flushes it.
+   * Jobs still pending stay queued in the store; crash recovery handles
+   * them on the next boot. The wait is bounded by the caller's shutdown
+   * timeout — a repair that outlasts it keeps running in the background.
+   */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    await Promise.allSettled([...this.inFlight]);
+  }
+
+  /**
+   * Starts queued repairs while under the concurrency cap. Each pump()
+   * awaits its own runOne() inside the loop, so a single invocation runs
+   * jobs sequentially — concurrency comes from enqueue() firing one
+   * pump() per job: overlapping invocations run side by side, and the
+   * shared activeCount check keeps the total at or under the cap
+   * (the check-then-increment is atomic: no await sits between them).
+   */
   private async pump(): Promise<void> {
-    while (this.activeCount < this.concurrency) {
+    while (!this.stopped && this.activeCount < this.concurrency) {
       const id = this.pending.shift();
       if (!id) return;
       this.activeCount++;
+      const run = this.runOne(id);
+      this.inFlight.add(run);
       try {
-        await this.runOne(id);
+        await run;
       } finally {
         this.activeCount--;
+        this.inFlight.delete(run);
       }
     }
   }
@@ -138,15 +254,105 @@ export class JobQueue {
   private async runOne(id: string): Promise<void> {
     const job = this.store.get(id);
     if (!job) return;
-    const update: JobUpdate = (status, patch) =>
-      this.store.updateStatus(id, status, patch);
+    const update: JobUpdate = (status, patch) => {
+      // Notes are sanitized inside JobStore.updateStatus (the single sink),
+      // so every caller is covered without each one remembering to do it.
+      // Notify only on actual transitions: a handler calling update() twice
+      // with the same status (e.g. around an internal retry) must not emit
+      // duplicate notifications.
+      const before = this.store.get(id)?.status;
+      const updated = this.store.updateStatus(id, status, patch);
+      if (updated && updated.status !== before) {
+        this.notifyTransition(updated);
+      }
+      // The runOne() catch path needs to know whether the terminal guard
+      // ignored the transition (undefined) or applied it (same-status
+      // idempotent re-entry); returning it is safe under the void-typed
+      // JobUpdate signature.
+      return updated;
+    };
     update("RUNNING");
     try {
       await this.handler(job, update);
     } catch (err) {
-      update("FAILED", {
+      const before = this.store.get(id)?.status;
+      const failed = update("FAILED", {
         note: err instanceof Error ? err.message : String(err),
       });
+      // The guard only warns when the transition really was ignored: a
+      // same-status FAILED re-entry is idempotent and DOES apply the
+      // note, so claiming the transition was ignored would be false.
+      if (before !== undefined && TERMINAL_STATUSES.has(before) && failed === undefined) {
+        // The FAILED transition was just ignored by the terminal guard:
+        // the error's message reaches the guard's warning via the note,
+        // but the stack — what the operator needs to diagnose a post-PR
+        // failure — would otherwise never be logged.
+        const stack =
+          err instanceof Error && err.stack ? err.stack : String(err);
+        console.warn(
+          `handler for job ${id} threw after reaching terminal status ${before}: ${sanitizeForPr(stack)}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Fire-and-forget Discord notification for the job-lifecycle transitions
+   * the user cares about. Never throws and never leaves an unhandled
+   * rejection: a broken notifier must not break the queue. JobNotifier is a
+   * public interface, so guard both failure modes of a custom
+   * implementation — a synchronously throwing notify() and a rejecting one
+   * (an unhandled rejection terminates the Node process).
+   */
+  private notifyTransition(job: Job | undefined): void {
+    if (!job || !this.notifier) return;
+    // Project the narrow DiscordJobRef the event type promises. Custom
+    // notifiers are third-party code, and the full Job carries raw
+    // errorContext, which may hold unredacted secrets — never hand that
+    // to code outside this module.
+    const ref: DiscordJobRef = {
+      id: job.id,
+      repository: job.repository,
+      issueId: job.issueId,
+      provider: job.provider,
+    };
+    let event: DiscordEvent | undefined;
+    switch (job.status) {
+      case "RUNNING":
+        event = { kind: "repair_started", job: ref };
+        break;
+      case "PR_CREATED":
+        event = { kind: "pr_created", job: ref, prUrl: job.prUrl };
+        break;
+      case "FAILED":
+      case "TIMED_OUT":
+        event = {
+          kind: "repair_failed",
+          job: ref,
+          reason: job.note ?? "unknown reason",
+        };
+        break;
+      case "NEEDS_HUMAN_REVIEW":
+        event = { kind: "needs_review", job: ref, note: job.note };
+        break;
+      default:
+        break;
+    }
+    if (event) {
+      const report = (err: unknown): void => {
+        // The notifier is an injection point: a third-party notifier may
+        // reject with a secret-bearing message (connection string, token
+        // in URL). Sanitize before it reaches stdout.
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`notification failed: ${sanitizeForPr(message)}`);
+      };
+      try {
+        // A synchronous throw from notify() is caught here; a rejection is
+        // caught by the .catch below.
+        void Promise.resolve(this.notifier.notify(event)).catch(report);
+      } catch (err) {
+        report(err);
+      }
     }
   }
 }

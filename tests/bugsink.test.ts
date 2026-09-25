@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Writable } from "node:stream";
 import { BugSinkProvider } from "../src/providers/bugsink.js";
 import { buildServer } from "../src/server.js";
 import { JobQueue, JobStore, type JobHandler } from "../src/jobs/jobs.js";
@@ -113,6 +114,25 @@ describe("POST /webhooks/bugsink", () => {
     });
   });
 
+  it("returns 503 for webhooks arriving while the queue is stopped", async () => {
+    const store = new JobStore();
+    const queue = new JobQueue(store, async () => {});
+    const app = buildServer({ webhookSecret: secret, config, queue });
+    await queue.stop();
+    const res = await app.inject({
+      method: "POST",
+      url: "/webhooks/bugsink",
+      headers: { "x-fixloop-webhook-token": secret },
+      payload: validPayload,
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({
+      received: true,
+      queued: false,
+      reason: "server is shutting down",
+    });
+  });
+
   it("also accepts the token as a ?token= query param", async () => {
     const app = buildServer({ webhookSecret: secret });
     const res = await app.inject({
@@ -144,6 +164,26 @@ describe("POST /webhooks/bugsink", () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it("returns 401 (not 500) when a multibyte token has the same string length", async () => {
+    // "sécret" is 6 chars / 7 bytes; "secrex" is 6 chars / 6 bytes. The
+    // comparison must use byte lengths, or timingSafeEqual throws.
+    const app = buildServer({ webhookSecret: "sécret" });
+    const res = await app.inject({
+      method: "POST",
+      url: "/webhooks/bugsink",
+      headers: { "x-fixloop-webhook-token": "secrex" },
+      payload: validPayload,
+    });
+    expect(res.statusCode).toBe(401);
+    const ok = await app.inject({
+      method: "POST",
+      url: "/webhooks/bugsink",
+      headers: { "x-fixloop-webhook-token": "sécret" },
+      payload: validPayload,
+    });
+    expect(ok.statusCode).toBe(202);
+  });
+
   it("rejects malformed payloads with 400", async () => {
     const app = buildServer({ webhookSecret: secret });
     const res = await app.inject({
@@ -155,6 +195,33 @@ describe("POST /webhooks/bugsink", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("never writes the ?token= secret to the request logs", async () => {
+    // The ingest route accepts ?token= for senders that cannot set
+    // headers; the pino redact wiring must keep it out of the logs.
+    const chunks: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(chunk.toString());
+        callback();
+      },
+    });
+    const app = buildServer({ webhookSecret: secret, config, logStream });
+    const res = await app.inject({
+      method: "POST",
+      url: `/webhooks/bugsink?token=${secret}`,
+      payload: validPayload,
+    });
+    expect(res.statusCode).toBe(202);
+    let logs = "";
+    for (let i = 0; i < 100 && !logs.includes("request completed"); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      logs = chunks.join("");
+    }
+    expect(logs).toContain("request completed");
+    expect(logs).toContain("token=[redacted]");
+    expect(logs).not.toContain(secret);
+  });
+
   it("fails closed when no webhook secret is configured", async () => {
     const app = buildServer({ webhookSecret: "" });
     const res = await app.inject({
@@ -162,6 +229,36 @@ describe("POST /webhooks/bugsink", () => {
       url: "/webhooks/bugsink",
       payload: validPayload,
     });
-    expect(res.statusCode).toBe(500);
+    // Indistinguishable from a wrong token: an anonymous prober must not
+    // learn whether the deployment has a secret configured.
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "invalid webhook token" });
+  });
+  describe("webhook dedup while the queue is stopped", () => {
+    it("answers 503 (not 202 deduped) when the sender retries during shutdown", async () => {
+      // Sequence: BugSink posts during shutdown -> 503 (job persisted, no
+      // repair starts) -> BugSink retries -> the persisted QUEUED row is a
+      // dedup hit. Answering 202 here would end the sender's retry cycle
+      // and the repair would be silently lost.
+      const store = new JobStore();
+      const queue = new JobQueue(store, async () => {});
+      const app = buildServer({ webhookSecret: secret, config, queue });
+      await queue.stop();
+      const post = () =>
+        app.inject({
+          method: "POST",
+          url: "/webhooks/bugsink",
+          headers: { "x-fixloop-webhook-token": secret },
+          payload: validPayload,
+        });
+      expect((await post()).statusCode).toBe(503);
+      const retry = await post();
+      expect(retry.statusCode).toBe(503);
+      expect(retry.json()).toMatchObject({
+        received: true,
+        queued: false,
+        reason: "server is shutting down",
+      });
+    });
   });
 });

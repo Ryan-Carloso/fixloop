@@ -71,6 +71,20 @@ describe("buildEnv", () => {
     expect(matches).toHaveLength(1);
     expect(env).toContain("GITHUB_TOKEN=ghp_def456");
   });
+
+  it("writes DISCORD_WEBHOOK_URL when a Discord webhook was provided", () => {
+    const env = buildEnv(
+      { ...SECRETS, discordWebhookUrl: "https://discord.com/api/webhooks/EXAMPLE" },
+      {},
+      "anthropic",
+    );
+    expect(env).toContain("DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/EXAMPLE");
+  });
+
+  it("omits DISCORD_WEBHOOK_URL when no Discord webhook was provided", () => {
+    const env = buildEnv(SECRETS, {}, "anthropic");
+    expect(env).not.toContain("DISCORD_WEBHOOK_URL");
+  });
 });
 
 describe("writeFileAtomic", () => {

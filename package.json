@@ -1,1 +1,36 @@
-{"bin":{"fixloop":"dist/cli/index.js"},"name":"fixloop","version":"0.1.0","description":"Turn application errors into tested, verified pull requests.","type":"module","scripts":{"build":"tsc -p tsconfig.json","dev":"node --watch dist/server.js","fake-bug":"node scripts/fake-bug.mjs","fixloop":"node dist/cli/index.js","start":"node dist/server.js","test":"vitest run","typecheck":"tsc --noEmit"},"engines":{"node":">=22"},"dependencies":{"@inquirer/prompts":"^8.7.2","commander":"^15.0.0","fastify":"^5.6.1","yaml":"^2.8.1","zod":"^3.25.76","octokit":"^5.0.5"},"devDependencies":{"@types/node":"^22.18.0","typescript":"^5.9.2","vitest":"^2.1.9"}}
+{
+  "bin": {
+    "fixloop": "dist/cli/index.js"
+  },
+  "name": "fixloop",
+  "version": "0.1.0",
+  "description": "Turn application errors into tested, verified pull requests.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-schema.mjs",
+    "dev": "node --watch dist/server.js",
+    "fake-bug": "node scripts/fake-bug.mjs",
+    "fixloop": "node dist/cli/index.js",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.7.2",
+    "commander": "^15.0.0",
+    "fastify": "^5.6.1",
+    "yaml": "^2.8.1",
+    "zod": "^3.25.76",
+    "octokit": "^5.0.5",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.2",
+    "vitest": "^2.1.9",
+    "@types/pg": "^8.11.10"
+  }
+}
