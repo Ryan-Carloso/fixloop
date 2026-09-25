@@ -428,6 +428,34 @@ describe("PostgresJobStore persistence", () => {
     ).toBe(true);
   });
 
+  it("close() does not hang forever on a stuck write", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const query = vi.fn(
+      async (
+        text: string,
+      ): Promise<{ rows: Record<string, unknown>[] }> => {
+        if (text.includes("INSERT INTO fixloop_jobs")) await gate;
+        return { rows: [] };
+      },
+    );
+    const end = vi.fn(async () => {});
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      { query, end },
+    );
+    store.create(makeJob());
+    await flushWriteBehind(); // let the write reach the gate
+
+    // The write never commits; close() must still resolve via its timeout
+    // and end the pool instead of hanging shutdown.
+    await store.close(50);
+    expect(end).toHaveBeenCalledTimes(1);
+    release();
+  });
+
   it("keeps working (in-memory) when a write fails, and warns loudly", async () => {
     const { client, query } = mockDb();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -495,6 +523,29 @@ describe("PostgresJobStore persistence", () => {
       client,
     );
     expect(store.findActiveByDedupKey(key)?.status).toBe("PR_CREATED");
+  });
+
+  it("skips rows with an invalid status instead of poisoning the store", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { client, rowsQueue } = mockDb();
+      const good = makeJob({ status: "FAILED" });
+      rowsQueue.push([
+        jobRow(good),
+        { ...jobRow(makeJob()), status: "bogus" },
+      ]);
+      const store = await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        client,
+      );
+      expect(store.get(good.id)?.status).toBe("FAILED");
+      expect(store.list()).toHaveLength(1); // the bogus row never hydrated
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("invalid status"),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("lists newest-first from hydrated rows", async () => {

@@ -38,6 +38,11 @@ export function sanitizeForPr(text: string): string {
       )
       // Bearer tokens.
       .replace(/\bBearer\s+[a-zA-Z0-9._-]{10,}\b/g, "Bearer [REDACTED]")
+      // Credentials embedded in URLs (postgres://user:pass@host/db).
+      .replace(
+        /([a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:)[^@\s/]+@/gi,
+        "$1[REDACTED]@",
+      )
   );
 }
 

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import pg from "pg";
-import { JobStore, type Job, type JobStatus } from "../jobs/jobs.js";
+import { JobStore, isJobStatus, type Job, type JobStatus } from "../jobs/jobs.js";
 import type { ErrorContext } from "../providers/error-provider.js";
 
 /**
@@ -65,6 +65,9 @@ const CRASHED_STATUSES: ReadonlySet<JobStatus> = new Set([
   "FIXING",
   "VERIFYING",
 ]);
+
+/** Upper bound for the write-behind flush during shutdown. */
+const SHUTDOWN_FLUSH_TIMEOUT_MS = 5_000;
 
 /** Note recorded when a restart orphans a mid-repair job. */
 const RESTART_NOTE = "interrupted by server restart";
@@ -186,6 +189,14 @@ export class PostgresJobStore extends JobStore {
   private async hydrate(): Promise<void> {
     const { rows } = await this.db.query(SELECT_ALL);
     for (const row of rows) {
+      if (!isJobStatus(row.status)) {
+        // Corrupt/hand-edited row: never let an invalid status into the
+        // store, where it would silently break dedup and ?status= filters.
+        console.warn(
+          `Postgres job store: skipping row ${String(row.id)} with invalid status ${String(row.status)}.`,
+        );
+        continue;
+      }
       const job = rowToJob(row);
       // Bypass the write-behind: these rows are already in Postgres.
       super.create(job);
@@ -260,10 +271,14 @@ export class PostgresJobStore extends JobStore {
 
   /**
    * Flushes pending writes, then closes the underlying database pool.
-   * Never throws — safe to call during shutdown.
+   * The flush is raced against a timeout so a black-holed connection can
+   * never hang shutdown forever. Never throws — safe to call on the way out.
    */
-  async close(): Promise<void> {
-    await this.flush();
+  async close(timeoutMs = SHUTDOWN_FLUSH_TIMEOUT_MS): Promise<void> {
+    await Promise.race([
+      this.flush(),
+      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
     await this.db.end?.().catch(() => {});
   }
 }

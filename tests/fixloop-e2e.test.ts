@@ -82,6 +82,19 @@ describe("sanitizeForPr", () => {
     expect(sanitizeForPr(input)).not.toContain("supersecret123");
   });
 
+  it("redacts credentials embedded in URLs", () => {
+    const input =
+      "connect ECONNREFUSED postgres://admin:hunter2@db:5432/fixloop";
+    const redacted = sanitizeForPr(input);
+    expect(redacted).not.toContain("hunter2");
+    expect(redacted).toContain("postgres://admin:[REDACTED]@db:5432/fixloop");
+  });
+
+  it("leaves credential-less URLs intact", () => {
+    const input = "GET https://discord.com/api/webhooks/123/abc returned 200";
+    expect(sanitizeForPr(input)).toBe(input);
+  });
+
   it("leaves normal messages intact", () => {
     const input = "Expected 5, got -1";
     expect(sanitizeForPr(input)).toBe(input);

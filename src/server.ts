@@ -160,6 +160,35 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   return app;
 }
 
+/**
+ * Registers SIGTERM/SIGINT handlers that flush the Postgres write-behind
+ * and close the pool before exiting. Extracted from main() so the wiring
+ * is unit-testable. In-flight HTTP requests are dropped on shutdown; the
+ * priority is flushing job history so it survives the restart.
+ */
+export function registerShutdown(
+  store: Pick<PostgresJobStore, "close">,
+  deps: {
+    onSignal?: (signal: "SIGTERM" | "SIGINT", handler: () => void) => void;
+    exit?: (code: number) => void;
+  } = {},
+): void {
+  const onSignal =
+    deps.onSignal ?? ((signal, handler) => process.on(signal, handler));
+  const exit = deps.exit ?? ((code: number) => process.exit(code));
+  let shuttingDown = false;
+  const shutdown = (): void => {
+    if (shuttingDown) return; // ignore repeats while the flush is running
+    shuttingDown = true;
+    void store
+      .close()
+      .catch(() => {})
+      .finally(() => exit(0));
+  };
+  onSignal("SIGTERM", shutdown);
+  onSignal("SIGINT", shutdown);
+}
+
 async function main(): Promise<void> {
   const port = Number(process.env.FIXLOOP_PORT ?? 3000);
   const host = process.env.FIXLOOP_HOST ?? "0.0.0.0";
@@ -181,22 +210,16 @@ async function main(): Promise<void> {
     try {
       store = await PostgresJobStore.connect(databaseUrl);
     } catch (err) {
-      console.error(`Failed to initialize Postgres job store: ${(err as Error).message}`);
+      console.error(
+        `Failed to initialize Postgres job store: ${err instanceof Error ? err.message : String(err)}`,
+      );
       process.exit(1);
     }
   }
 
   const app = buildServer({ config, store });
   if (store instanceof PostgresJobStore) {
-    // Flush the write-behind chains and close the pool on shutdown, so the
-    // final transitions are not lost and no sockets are left dangling.
-    const pgStore = store;
-    const shutdown = async (): Promise<void> => {
-      await pgStore.close().catch(() => {});
-      process.exit(0);
-    };
-    process.on("SIGTERM", () => void shutdown());
-    process.on("SIGINT", () => void shutdown());
+    registerShutdown(store);
   }
   await app.listen({ port, host });
 }
