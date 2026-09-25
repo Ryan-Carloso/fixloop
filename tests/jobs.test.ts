@@ -139,6 +139,55 @@ describe("JobQueue", () => {
     expect(res.job.id).toBe("job-1b");
   });
 
+  it("applies the patch on an idempotent same-status terminal re-entry", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const store = new JobStore();
+      store.create(makeJob("idem"));
+      store.updateStatus("job-idem", "PR_CREATED");
+      // A handler attaching the PR URL after the terminal transition is a
+      // legitimate idempotent call: apply the patch instead of warning
+      // about an "invalid transition" and silently dropping it.
+      const updated = store.updateStatus("job-idem", "PR_CREATED", {
+        prUrl: "https://github.com/o/r/pull/9",
+      });
+      expect(updated?.status).toBe("PR_CREATED");
+      expect(updated?.prUrl).toBe("https://github.com/o/r/pull/9");
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).not.toContain("ignoring transition");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("runs up to `concurrency` jobs at once via overlapping pump() invocations", async () => {
+    // pump() awaits each runOne() inside its own loop, so concurrency
+    // comes from enqueue() firing one pump() per job: rapid enqueues
+    // overlap and run together, bounded by the concurrency cap.
+    const store = new JobStore();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const handler: JobHandler = async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await gate;
+      inFlight--;
+    };
+    const queue = new JobQueue(store, handler, 2);
+    queue.enqueue(makeJob("c1"));
+    queue.enqueue(makeJob("c2"));
+    queue.enqueue(makeJob("c3"));
+    await vi.waitFor(() => expect(maxInFlight).toBe(2));
+    // The third job stays queued while two are active.
+    expect(store.get("job-c3")!.status).toBe("QUEUED");
+    releaseGate(); // unblock the handlers so stop() can quiesce
+    await queue.stop();
+  });
+
   it("ignores transitions out of terminal states", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {

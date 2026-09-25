@@ -91,10 +91,12 @@ export class JobStore {
   }
 
   list(status?: JobStatus): Job[] {
-    const jobs = [...this.jobs.values()].sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt),
+    // Filter before sorting: with a status filter the excluded jobs would
+    // otherwise be sorted for nothing, at O(total) instead of O(matched).
+    const jobs = [...this.jobs.values()].filter(
+      (job) => !status || job.status === status,
     );
-    return status ? jobs.filter((job) => job.status === status) : jobs;
+    return jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   updateStatus(
@@ -111,6 +113,16 @@ export class JobStore {
       patch?.note === undefined
         ? patch
         : { ...patch, note: sanitizeForPr(patch.note) };
+    if (job.status === status) {
+      // Idempotent re-entry (e.g. a handler attaching prUrl after the
+      // terminal PR_CREATED transition): apply the patch instead of
+      // warning about an invalid transition and dropping it. No
+      // notification — runOne's update wrapper only notifies on actual
+      // status changes.
+      job.updatedAt = new Date().toISOString();
+      if (cleanPatch) Object.assign(job, cleanPatch);
+      return job;
+    }
     if (TERMINAL_STATUSES.has(job.status)) {
       // Late transition out of a terminal state: ignore it (see
       // TERMINAL_STATUSES). Returning undefined keeps the caller's
@@ -209,6 +221,14 @@ export class JobQueue {
     await Promise.allSettled([...this.inFlight]);
   }
 
+  /**
+   * Starts queued repairs while under the concurrency cap. Each pump()
+   * awaits its own runOne() inside the loop, so a single invocation runs
+   * jobs sequentially — concurrency comes from enqueue() firing one
+   * pump() per job: overlapping invocations run side by side, and the
+   * shared activeCount check keeps the total at or under the cap
+   * (the check-then-increment is atomic: no await sits between them).
+   */
   private async pump(): Promise<void> {
     while (!this.stopped && this.activeCount < this.concurrency) {
       const id = this.pending.shift();
