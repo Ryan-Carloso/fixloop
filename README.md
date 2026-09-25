@@ -151,11 +151,18 @@ Environment variables:
   `postgres://user:pass@localhost:5432/fixloop`). When set, jobs are
   persisted to Postgres so history survives restarts; the schema is applied
   automatically on boot and the server exits if the database is unreachable.
-  When unset, FixLoop keeps the in-memory store (zero-config dev mode).
+  One instance per database: boot takes a Postgres advisory lock, and a
+  second process against the same `DATABASE_URL` refuses to start, because
+  crash recovery rewrites transient rows and two writers would corrupt
+  each other. When unset, FixLoop keeps the in-memory store (zero-config
+  dev mode).
 - `DISCORD_WEBHOOK_URL`: Discord webhook URL for repair notifications
-  (repair started, fix PR created, repair failed). Optional — when unset,
-  notifications are silently disabled. Collected by `fixloop setup`
-  (stored in the install `.env` file, never in the YAML config).
+  (repair started, fix PR created, repair failed, repair needs human
+  review). Optional — when unset, notifications are silently disabled.
+  Collected by `fixloop setup` (stored in the install `.env` file, never
+  in the YAML config). Note: the current stub repair handler never
+  produces a verified fix, so every accepted webhook yields two messages
+  (started + needs review) until a real repair pipeline lands.
 
 ## API Endpoints
 

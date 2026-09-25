@@ -61,6 +61,15 @@ export function makePool(databaseUrl: string): pg.Pool {
   return pool;
 }
 
+/** Dedicated lock client: query + release (pg.PoolClient satisfies it). */
+export interface LockClient {
+  query(
+    text: string,
+    params?: unknown[],
+  ): Promise<{ rows: Record<string, unknown>[] }>;
+  release(): void;
+}
+
 /**
  * Upper bound for rows loaded by hydrate(). History grows without
  * bound, so boot must not materialize the whole table into the
@@ -109,6 +118,17 @@ const CRASHED_STATUSES: ReadonlySet<JobStatus> = new Set([
 
 /** Upper bound for the write-behind flush during shutdown. */
 const SHUTDOWN_FLUSH_TIMEOUT_MS = 5_000;
+
+/** Bound for releasing the instance advisory lock on the way out. */
+const LOCK_RELEASE_TIMEOUT_MS = 2_000;
+
+/**
+ * Advisory-lock key claiming a Postgres database for one FixLoop
+ * instance. Crash recovery rewrites every transient row on boot, so two
+ * processes sharing one DATABASE_URL corrupt each other — the lock
+ * makes the second boot fail fast instead.
+ */
+const ADVISORY_LOCK_KEY = 2_026_092_501;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -210,7 +230,10 @@ export class PostgresJobStore extends JobStore {
    */
   private readonly persistChains = new Map<string, Promise<void>>();
 
-  private constructor(private readonly db: DbClient) {
+  private constructor(
+    private readonly db: DbClient,
+    private readonly releaseLock: () => Promise<void>,
+  ) {
     super();
   }
 
@@ -239,7 +262,33 @@ export class PostgresJobStore extends JobStore {
     // Bound the connect phase: pg waits forever by default
     // (connectionTimeoutMillis: 0), which would hang boot on a black-holed
     // host instead of failing fast with the clear error below.
-    const client: DbClient = db ?? makePool(databaseUrl);
+    // Only a real pool takes the single-instance advisory lock: injected
+    // DbClients are test doubles, and the lock is a production Postgres
+    // feature.
+    let pool: pg.Pool | undefined;
+    let client: DbClient;
+    if (db) {
+      client = db;
+    } else {
+      pool = makePool(databaseUrl);
+      client = pool;
+    }
+    // Dedicated client holding the advisory lock for the process
+    // lifetime (see below). A pooled session cannot hold it reliably:
+    // the pool may close idle connections, silently releasing the lock.
+    let lockClient: LockClient | undefined;
+    const releaseLock = async (): Promise<void> => {
+      if (!lockClient) return;
+      const lock = lockClient;
+      lockClient = undefined;
+      await Promise.race([
+        lock
+          .query("SELECT pg_advisory_unlock($1)", [ADVISORY_LOCK_KEY])
+          .catch(() => {}),
+        sleep(LOCK_RELEASE_TIMEOUT_MS),
+      ]);
+      lock.release();
+    };
     try {
       await client.query("SELECT 1");
     } catch (err) {
@@ -251,13 +300,35 @@ export class PostgresJobStore extends JobStore {
           "Is Postgres running and is DATABASE_URL correct?",
       );
     }
-    const store = new PostgresJobStore(client);
+    const store = new PostgresJobStore(client, releaseLock);
     try {
       await client.query(loadSchemaSql());
+      if (pool) {
+        // Single-instance guard: crash recovery rewrites every transient
+        // row on boot, so two processes sharing one DATABASE_URL corrupt
+        // each other — the second boot would mark the first instance's
+        // live jobs FAILED and free their dedup keys. Take a
+        // session-level advisory lock on a dedicated client and hold it
+        // until close(); Postgres releases it automatically if this
+        // process dies, so a crashed instance never blocks a restart.
+        lockClient = await pool.connect();
+        const { rows } = await lockClient.query(
+          "SELECT pg_try_advisory_lock($1) AS acquired",
+          [ADVISORY_LOCK_KEY],
+        );
+        if (rows[0]?.acquired !== true) {
+          throw new Error(
+            "FixLoop: another instance is already using this Postgres " +
+              "database (advisory lock is held); refusing to start a " +
+              "second one against the same DATABASE_URL.",
+          );
+        }
+      }
       await store.hydrate(notifier);
     } catch (err) {
-      // Same best-effort cleanup as the probe path: schema or hydration
-      // failures must not leak the pool for an embedding caller.
+      // Same best-effort cleanup as the probe path: schema, lock, or
+      // hydration failures must not leak the pool for an embedding caller.
+      await releaseLock();
       await client.end?.().catch(() => {});
       throw err;
     }
@@ -423,6 +494,10 @@ export class PostgresJobStore extends JobStore {
           `with ${this.persistChains.size} write(s) still pending; they were dropped.`,
       );
     }
+    // Release the instance advisory lock before tearing down the pool:
+    // pool.end() waits for checked-out clients, and the lock client is
+    // checked out for the process lifetime.
+    await this.releaseLock();
     const endPromise = (async (): Promise<true> => {
       try {
         await this.db.end?.();

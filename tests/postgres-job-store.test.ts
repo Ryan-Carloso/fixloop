@@ -39,8 +39,24 @@ const pgControl = vi.hoisted(() => {
   // The fake pool only needs the DbClient surface plus .on, which
   // makePool() calls to attach the idle-client error listener.
   const on = vi.fn((_event: string, _handler: (err: Error) => void) => {});
-  const Pool = vi.fn((_config: unknown) => ({ query, end, on }));
-  return { query, end, Pool, on };
+  // Fake dedicated lock client (pg.PoolClient surface: query + release).
+  const lockQuery = vi.fn(
+    async () => ({ rows: [{ acquired: true }] }) as {
+      rows: Record<string, unknown>[];
+    },
+  );
+  const lockRelease = vi.fn(() => {});
+  const poolConnect = vi.fn(async () => ({
+    query: lockQuery,
+    release: lockRelease,
+  }));
+  const Pool = vi.fn((_config: unknown) => ({
+    query,
+    end,
+    on,
+    connect: poolConnect,
+  }));
+  return { query, end, Pool, on, poolConnect, lockQuery, lockRelease };
 });
 
 vi.mock("pg", () => ({
@@ -881,5 +897,50 @@ describe("PostgresJobStore hydration cap", () => {
       client,
     );
     expect(store.list()).toHaveLength(HYDRATE_ROW_LIMIT);
+  });
+});
+
+describe("PostgresJobStore single-instance advisory lock", () => {
+  it("takes the advisory lock on a dedicated client when using a real pool", async () => {
+    await PostgresJobStore.connect("postgres://localhost:5432/fixloop");
+    expect(pgControl.poolConnect).toHaveBeenCalled();
+    expect(pgControl.lockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("pg_try_advisory_lock"),
+      [expect.any(Number)],
+    );
+  });
+
+  it("refuses to start when the advisory lock is held", async () => {
+    pgControl.lockQuery.mockResolvedValueOnce({ rows: [{ acquired: false }] });
+    await expect(
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop"),
+    ).rejects.toThrow(
+      "another instance is already using this Postgres database",
+    );
+    // Best-effort cleanup: the lock client is released and the pool ended.
+    expect(pgControl.lockRelease).toHaveBeenCalled();
+    expect(pgControl.end).toHaveBeenCalled();
+  });
+
+  it("releases the advisory lock on close()", async () => {
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+    );
+    await store.close();
+    expect(pgControl.lockQuery).toHaveBeenCalledWith(
+      expect.stringContaining("pg_advisory_unlock"),
+      [expect.any(Number)],
+    );
+    expect(pgControl.lockRelease).toHaveBeenCalled();
+  });
+
+  it("skips the lock entirely for injected DbClients", async () => {
+    const { client } = mockDb();
+    pgControl.poolConnect.mockClear();
+    await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    expect(pgControl.poolConnect).not.toHaveBeenCalled();
   });
 });
