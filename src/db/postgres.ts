@@ -99,7 +99,7 @@ const SELECT_ALL = `
          error_context, note, pr_url, created_at, updated_at
   FROM fixloop_jobs
   ORDER BY created_at DESC
-  LIMIT ${HYDRATE_ROW_LIMIT}
+  LIMIT ${HYDRATE_ROW_LIMIT + 1}
 `;
 
 const UPSERT_JOB = `
@@ -173,7 +173,6 @@ function dbErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Maps a fixloop_jobs row to the Job interface. */
 /**
  * Maps a raw Postgres row to a Job. Status and errorContext must already
  * be validated by the caller (see hydrate); they are passed in so this
@@ -250,11 +249,6 @@ export class PostgresJobStore extends JobStore {
     super();
   }
 
-  /**
-   * Connects to Postgres, applies the schema, and hydrates existing jobs.
-   * Throws a clear error when the database is unreachable (fail fast).
-   * Pass a DbClient to inject a fake (tests) instead of opening a real pool.
-   */
   /**
    * Builds the store over an explicit client (tests) or a real pg.Pool
    * (production), probes the connection, applies the schema, and hydrates
@@ -392,8 +386,13 @@ export class PostgresJobStore extends JobStore {
     // Belt and braces: the SQL above already orders and limits, but a
     // DbClient seam (or a future edit of the query) might not — never
     // let an unbounded table fill the in-memory Map.
+    // The query fetches LIMIT + 1 rows: the extra sentinel row is the only
+    // accurate signal that older rows beyond the window exist (a plain
+    // `rows.length >= LIMIT` check false-positives when the table holds
+    // exactly LIMIT rows and nothing was skipped).
+    const truncated = rows.length > HYDRATE_ROW_LIMIT;
     const capped = rows.slice(0, HYDRATE_ROW_LIMIT);
-    if (rows.length >= HYDRATE_ROW_LIMIT) {
+    if (truncated) {
       // The read window was full: older rows beyond the LIMIT were not
       // loaded, so crash recovery skipped them — any stuck in a transient
       // status stay ACTIVE in Postgres indefinitely. The README documents
@@ -556,12 +555,6 @@ export class PostgresJobStore extends JobStore {
     }
   }
 
-  /**
-   * Awaits all in-flight write-behind chains. Drain-loops: a transition
-   * enqueued while we were awaiting must also commit, otherwise close()
-   * could end the pool with writes still pending. close() races this
-   * against SHUTDOWN_FLUSH_TIMEOUT_MS, so the loop cannot hang shutdown.
-   */
   /**
    * Waits for pending write-behind chains to drain. Bounded: a write stuck
    * on a black-holed connection (pg has no default query timeout) must not

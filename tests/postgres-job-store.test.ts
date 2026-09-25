@@ -1134,8 +1134,10 @@ describe("PostgresJobStore hydration window", () => {
     const { client, rowsQueue } = mockDb();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
+      // LIMIT + 1 rows: the extra sentinel row proves the table holds more
+      // than the hydration window.
       rowsQueue.push(
-        Array.from({ length: HYDRATE_ROW_LIMIT }, (_, i) =>
+        Array.from({ length: HYDRATE_ROW_LIMIT + 1 }, (_, i) =>
           jobRow(makeJob({ id: `job-limit-${i}`, status: "QUEUED" })),
         ),
       );
@@ -1155,6 +1157,29 @@ describe("PostgresJobStore hydration window", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       rowsQueue.push([jobRow(makeJob({ status: "QUEUED" }))]);
+      await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        client,
+      );
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).not.toMatch(/row limit/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("stays quiet when the table holds exactly the row limit (no false positive)", async () => {
+    // Regression: the old `rows.length >= LIMIT` check warned even when
+    // nothing was skipped. The LIMIT + 1 sentinel only warns when a row
+    // beyond the window actually exists.
+    const { client, rowsQueue } = mockDb();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      rowsQueue.push(
+        Array.from({ length: HYDRATE_ROW_LIMIT }, (_, i) =>
+          jobRow(makeJob({ id: `job-exact-${i}`, status: "QUEUED" })),
+        ),
+      );
       await PostgresJobStore.connect(
         "postgres://localhost:5432/fixloop",
         client,

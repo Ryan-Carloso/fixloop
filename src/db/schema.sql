@@ -26,3 +26,8 @@ CREATE INDEX IF NOT EXISTS fixloop_jobs_dedup_key_idx
 
 CREATE INDEX IF NOT EXISTS fixloop_jobs_status_idx
   ON fixloop_jobs (status);
+
+-- Hydration runs ORDER BY created_at DESC LIMIT on every boot; without
+-- this index a growing table pays a full sort each time.
+CREATE INDEX IF NOT EXISTS fixloop_jobs_created_at_idx
+  ON fixloop_jobs (created_at DESC);
