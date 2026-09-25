@@ -160,6 +160,32 @@ describe("JobQueue", () => {
     }
   });
 
+  it("does not claim the FAILED transition was ignored on a same-status re-entry", async () => {
+    // A handler that reaches FAILED via update() and then throws: the
+    // catch's FAILED update is a same-status idempotent re-entry, so the
+    // note IS written — the "threw after reaching terminal status"
+    // warning (which says the transition was ignored by the guard) must
+    // not fire.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const store = new JobStore();
+      const handler: JobHandler = async (_job, update) => {
+        update("FAILED", { note: "first failure" });
+        throw new Error("boom-after-terminal");
+      };
+      const queue = new JobQueue(store, handler);
+      queue.enqueue(makeJob("late-throw"));
+      await vi.waitFor(() => {
+        expect(store.get("job-late-throw")?.note).toContain(
+          "boom-after-terminal",
+        );
+      });
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).not.toContain("threw after reaching terminal status");
+    } finally {
+      warn.mockRestore();
+    }
+  });
   it("runs up to `concurrency` jobs at once via overlapping pump() invocations", async () => {
     // pump() awaits each runOne() inside its own loop, so concurrency
     // comes from enqueue() firing one pump() per job: rapid enqueues

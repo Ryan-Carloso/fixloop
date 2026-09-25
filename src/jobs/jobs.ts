@@ -259,16 +259,24 @@ export class JobQueue {
       if (updated && updated.status !== before) {
         this.notifyTransition(updated);
       }
+      // The runOne() catch path needs to know whether the terminal guard
+      // ignored the transition (undefined) or applied it (same-status
+      // idempotent re-entry); returning it is safe under the void-typed
+      // JobUpdate signature.
+      return updated;
     };
     update("RUNNING");
     try {
       await this.handler(job, update);
     } catch (err) {
       const before = this.store.get(id)?.status;
-      update("FAILED", {
+      const failed = update("FAILED", {
         note: err instanceof Error ? err.message : String(err),
       });
-      if (before !== undefined && TERMINAL_STATUSES.has(before)) {
+      // The guard only warns when the transition really was ignored: a
+      // same-status FAILED re-entry is idempotent and DOES apply the
+      // note, so claiming the transition was ignored would be false.
+      if (before !== undefined && TERMINAL_STATUSES.has(before) && failed === undefined) {
         // The FAILED transition was just ignored by the terminal guard:
         // the error's message reaches the guard's warning via the note,
         // but the stack — what the operator needs to diagnose a post-PR
