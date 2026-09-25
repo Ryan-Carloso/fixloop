@@ -381,3 +381,41 @@ describe("JobQueue.stop", () => {
     expect(store.get(job.id)?.status).toBe("QUEUED");
   });
 });
+
+describe("JobStore.updateStatus note sanitization", () => {
+  it("sanitizes notes inside updateStatus so direct callers can't leak secrets", () => {
+    // The queue wrapper used to be the only sanitizer; any direct caller
+    // (hydrate, future code) bypassed it and raw error text reached the
+    // DB, the API, and Discord. The store is the single sink now.
+    const store = new JobStore();
+    const job = makeJob("sink-1");
+    store.create(job);
+    const updated = store.updateStatus(job.id, "RUNNING", {
+      note: "boom: password=hunter2",
+    });
+    expect(updated?.note).toContain("password=[REDACTED]");
+    expect(updated?.note).not.toContain("hunter2");
+  });
+
+  it("sanitizes the note in the terminal-guard warning for direct callers", () => {
+    const store = new JobStore();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const job = makeJob("sink-2");
+      store.create(job);
+      store.updateStatus(job.id, "FAILED", { note: "done" });
+      // Direct call bypassing the queue wrapper: the terminal guard must
+      // still log a redacted note.
+      const result = store.updateStatus(job.id, "RUNNING", {
+        note: "late: password=hunter2",
+      });
+      expect(result).toBeUndefined();
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).toContain("ignoring transition");
+      expect(warnings).toContain("password=[REDACTED]");
+      expect(warnings).not.toContain("hunter2");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

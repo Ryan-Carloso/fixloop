@@ -104,16 +104,22 @@ export class JobStore {
   ): Job | undefined {
     const job = this.jobs.get(id);
     if (!job) return undefined;
+    // Sanitize here — the single sink — so every caller (the queue, crash
+    // recovery, future direct users) gets redacted notes in the store, the
+    // DB write-behind, the API, Discord, and the terminal-guard log below.
+    const cleanPatch =
+      patch?.note === undefined
+        ? patch
+        : { ...patch, note: sanitizeForPr(patch.note) };
     if (TERMINAL_STATUSES.has(job.status)) {
       // Late transition out of a terminal state: ignore it (see
       // TERMINAL_STATUSES). Returning undefined keeps the caller's
       // no-change path (no notification, no write-behind). Include the
       // note when present: a handler that throws after reaching a
-      // terminal state would otherwise lose its error entirely. Notes
-      // are sanitized at capture (JobQueue.runOne), so this is safe to log.
+      // terminal state would otherwise lose its error entirely.
       const note =
-        typeof patch?.note === "string" && patch.note.length > 0
-          ? `: ${patch.note}`
+        typeof cleanPatch?.note === "string" && cleanPatch.note.length > 0
+          ? `: ${cleanPatch.note}`
           : "";
       console.warn(
         `ignoring transition of job ${id} from terminal status ${job.status} to ${status}${note}`,
@@ -122,7 +128,7 @@ export class JobStore {
     }
     job.status = status;
     job.updatedAt = new Date().toISOString();
-    if (patch) Object.assign(job, patch);
+    if (cleanPatch) Object.assign(job, cleanPatch);
     return job;
   }
 
@@ -223,16 +229,9 @@ export class JobQueue {
     const job = this.store.get(id);
     if (!job) return;
     const update: JobUpdate = (status, patch) => {
-      // Notes can carry raw error text (command output, env dumps) from any
-      // call site; sanitize once here so every sink (DB, API, Discord)
-      // stays redacted.
-      const updated = this.store.updateStatus(
-        id,
-        status,
-        patch?.note === undefined
-          ? patch
-          : { ...patch, note: sanitizeForPr(patch.note) },
-      );
+      // Notes are sanitized inside JobStore.updateStatus (the single sink),
+      // so every caller is covered without each one remembering to do it.
+      const updated = this.store.updateStatus(id, status, patch);
       this.notifyTransition(updated);
     };
     update("RUNNING");

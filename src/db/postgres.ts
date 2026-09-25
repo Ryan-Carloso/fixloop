@@ -86,6 +86,13 @@ export interface LockClient {
  */
 export const HYDRATE_ROW_LIMIT = 1000;
 
+/**
+ * Bound for concurrent crash-recovery Discord notifications (see
+ * notifyRecovery): a crash with many in-flight repairs must not burst
+ * one webhook POST per orphaned row.
+ */
+const RECOVERY_NOTIFY_CONCURRENCY = 3;
+
 const SELECT_ALL = `
   SELECT id, dedup_key, provider, repository, issue_id, status,
          error_context, note, pr_url, created_at, updated_at
@@ -358,7 +365,27 @@ export class PostgresJobStore extends JobStore {
     // DbClient seam (or a future edit of the query) might not — never
     // let an unbounded table fill the in-memory Map.
     const capped = rows.slice(0, HYDRATE_ROW_LIMIT);
+    if (rows.length >= HYDRATE_ROW_LIMIT) {
+      // The read window was full: older rows beyond the LIMIT were not
+      // loaded, so crash recovery skipped them — any stuck in a transient
+      // status stay ACTIVE in Postgres indefinitely. The README documents
+      // the invisibility, but the operator otherwise gets no signal that
+      // the table is accumulating permanently-wrong rows.
+      console.warn(
+        `Postgres job store: hydration hit the row limit (${HYDRATE_ROW_LIMIT}); ` +
+          `older rows beyond the window were not crash-recovered and stay active. ` +
+          `Consider pruning old job history.`,
+      );
+    }
     let skipped = 0;
+    // Crash-recovery notifications are fanned out after the loop (see
+    // notifyRecovery): one fire-and-forget POST per orphaned row would
+    // burst up to HYDRATE_ROW_LIMIT concurrent fetches at the webhook.
+    const recoveryEvents: Array<{
+      kind: "repair_failed";
+      job: Job;
+      reason: string;
+    }> = [];
     for (const row of capped) {
       if (!isJobStatus(row.status)) {
         // Corrupt/hand-edited row: never let an invalid status into the
@@ -394,25 +421,18 @@ export class PostgresJobStore extends JobStore {
         if (failed && notifier) {
           // The queue's notifyTransition never sees these (no queue
           // exists at hydrate time): this is the exact failure the
-          // notifier exists for, so report it directly. Fire-and-forget
-          // with the same never-throw guard as JobQueue — a broken
-          // notifier must not break hydration or boot.
-          const event = {
-            kind: "repair_failed" as const,
+          // notifier exists for, so report it directly. Collected for the
+          // bounded fan-out after the loop.
+          recoveryEvents.push({
+            kind: "repair_failed",
             job: failed,
             reason: RESTART_NOTE,
-          };
-          void (async () => {
-            try {
-              await notifier.notify(event);
-            } catch (err) {
-              console.warn(
-                `notification failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            }
-          })();
+          });
         }
       }
+    }
+    if (notifier && recoveryEvents.length > 0) {
+      void this.notifyRecovery(recoveryEvents, notifier);
     }
     if (skipped > 0) {
       // One summary line: skipped rows stay skipped on every boot, so the
@@ -422,6 +442,33 @@ export class PostgresJobStore extends JobStore {
         `Postgres job store: skipped ${skipped} corrupt row(s) during hydration; ` +
           `they are invisible to the API until removed manually, e.g. ` +
           `DELETE FROM fixloop_jobs WHERE id = '<id>';`,
+      );
+    }
+  }
+
+  /**
+   * Fan out crash-recovery notifications with bounded concurrency.
+   * Fire-and-forget with the same never-throw guard as JobQueue — a
+   * broken notifier must not break hydration or boot. Unbounded
+   * concurrency here would burst up to HYDRATE_ROW_LIMIT fetches at the
+   * webhook and get rate-limited (429s are logged and dropped, so the
+   * notifications would be silently lost).
+   */
+  private async notifyRecovery(
+    events: Array<{ kind: "repair_failed"; job: Job; reason: string }>,
+    notifier: JobNotifier,
+  ): Promise<void> {
+    for (let i = 0; i < events.length; i += RECOVERY_NOTIFY_CONCURRENCY) {
+      await Promise.all(
+        events.slice(i, i + RECOVERY_NOTIFY_CONCURRENCY).map(async (event) => {
+          try {
+            await notifier.notify(event);
+          } catch (err) {
+            console.warn(
+              `notification failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }),
       );
     }
   }

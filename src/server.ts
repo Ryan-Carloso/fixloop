@@ -368,7 +368,7 @@ export async function resolveStore(
   }
 }
 
-async function main(): Promise<void> {
+async function main(deps: { handleJob?: JobHandler } = {}): Promise<void> {
   const port = Number(process.env.FIXLOOP_PORT ?? 3000);
   const host = process.env.FIXLOOP_HOST ?? "0.0.0.0";
 
@@ -394,8 +394,16 @@ async function main(): Promise<void> {
     // write-behind. Residual risk: a repair that outlasts the beforeClose
     // timeout keeps running in the background; its late transitions are
     // dropped by the pool close, and crash recovery marks the job
-    // interrupted on the next boot (dedup key freed).
-    const queue = new JobQueue(store, stubHandler, 1, notifier);
+    // interrupted on the next boot (dedup key freed). The handler is
+    // threaded like the in-memory branch (buildServer honors
+    // deps.handleJob) so the two boot paths can't silently drift when a
+    // real repair pipeline lands.
+    const queue = new JobQueue(
+      store,
+      deps.handleJob ?? stubHandler,
+      1,
+      notifier,
+    );
     app = buildServer({ config, store, queue });
     registerShutdown(store, {
       beforeClose: async () => {

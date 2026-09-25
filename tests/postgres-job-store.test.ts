@@ -999,3 +999,82 @@ describe("PostgresJobStore advisory lock release", () => {
     expect(pgControl.lockRelease).toHaveBeenCalledWith(expect.any(Error));
   });
 });
+
+describe("PostgresJobStore crash-recovery notification fan-out", () => {
+  it("caps concurrent recovery notifications instead of bursting one fetch per orphaned row", async () => {
+    // A crash with many in-flight repairs must not launch hundreds of
+    // concurrent webhook POSTs: Discord rate-limits (429) and the
+    // notifications are silently lost.
+    const { client, rowsQueue } = mockDb();
+    rowsQueue.push(
+      Array.from({ length: 6 }, (_, i) =>
+        jobRow(makeJob({ id: `job-burst-${i}`, status: "RUNNING" })),
+      ),
+    );
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const notifier = {
+      notify: async (): Promise<void> => {
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        try {
+          await gate;
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+    await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+      notifier,
+    );
+    // The fan-out is fire-and-forget: give it a moment to start.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(maxInFlight).toBeGreaterThan(0);
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+    release();
+  });
+});
+
+describe("PostgresJobStore hydration window", () => {
+  it("warns when hydration hits the row limit (older rows escape crash recovery)", async () => {
+    const { client, rowsQueue } = mockDb();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      rowsQueue.push(
+        Array.from({ length: HYDRATE_ROW_LIMIT }, (_, i) =>
+          jobRow(makeJob({ id: `job-limit-${i}`, status: "QUEUED" })),
+        ),
+      );
+      await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        client,
+      );
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).toMatch(/row limit/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("stays quiet when hydration loads fewer rows than the limit", async () => {
+    const { client, rowsQueue } = mockDb();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      rowsQueue.push([jobRow(makeJob({ status: "QUEUED" }))]);
+      await PostgresJobStore.connect(
+        "postgres://localhost:5432/fixloop",
+        client,
+      );
+      const warnings = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(warnings).not.toMatch(/row limit/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
