@@ -76,6 +76,7 @@ function happyPathAnswers(): Array<string | boolean> {
     "anthropic/claude-sonnet-4-5", // model
     "fixloop-runner:latest", // runner image
     true, // run AI probe
+    "", // discord webhook URL (skip)
     true, // save configuration
     false, // start now
   ];
@@ -150,6 +151,7 @@ describe("runSetup happy path", () => {
         "anthropic/claude-sonnet-4-5",
         "fixloop-runner:latest",
         false, // skip AI probe
+        "", // discord webhook URL (skip)
         true, // save
         false, // start
       ]),
@@ -161,6 +163,52 @@ describe("runSetup happy path", () => {
     });
     expect(result.saved).toBe(true);
     expect(readFileSync(join(dir, "fixloop.config.yaml"), "utf8")).toContain("octocat/manual");
+  });
+});
+
+describe("runSetup discord webhook", () => {
+  const DISCORD_URL = "https://discord.com/api/webhooks/EXAMPLE";
+
+  /** happyPathAnswers with the Discord answer replaced (it sits third from last). */
+  function answersWithDiscord(discord: string): Array<string | boolean> {
+    const answers = happyPathAnswers();
+    answers[answers.length - 3] = discord;
+    return answers;
+  }
+
+  function runWizard(discord: string, lines: string[]) {
+    const dir = makeDir();
+    return runSetup({
+      dir,
+      prompter: new FakePrompter(answersWithDiscord(discord)),
+      commandRunner: fakeCommandRunner(),
+      docker: fakeDocker(),
+      createGitHubApi: () => fakeGitHub(),
+      output: (l) => lines.push(l),
+      generateToken: () => "fixed-webhook-token-abcdef123456",
+      startServer: async () => true,
+    }).then((result) => ({ dir, result }));
+  }
+
+  it("saves the Discord webhook URL to .env, never to YAML or output", async () => {
+    const lines: string[] = [];
+    const { dir, result } = await runWizard(DISCORD_URL, lines);
+    expect(result.saved).toBe(true);
+
+    const env = readFileSync(join(dir, ".env"), "utf8");
+    expect(env).toContain(`DISCORD_WEBHOOK_URL=${DISCORD_URL}`);
+
+    const yaml = readFileSync(join(dir, "fixloop.config.yaml"), "utf8");
+    expect(yaml).not.toContain(DISCORD_URL);
+
+    assertNoSecrets(lines.join("\n"), [DISCORD_URL]);
+  });
+
+  it("omits DISCORD_WEBHOOK_URL when skipped with an empty answer", async () => {
+    const { dir, result } = await runWizard("", []);
+    expect(result.saved).toBe(true);
+    const env = readFileSync(join(dir, ".env"), "utf8");
+    expect(env).not.toContain("DISCORD_WEBHOOK_URL");
   });
 });
 

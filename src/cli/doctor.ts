@@ -255,6 +255,34 @@ export async function runDoctor(deps: DoctorDeps = {}): Promise<DoctorResult> {
     }
   }
 
+  // 7b. Discord webhook (optional): a GET on a valid webhook URL returns 200.
+  // Skipped entirely when not configured.
+  const discordWebhookUrl = secretValue("DISCORD_WEBHOOK_URL");
+  if (discordWebhookUrl?.trim()) {
+    secretValues.push(discordWebhookUrl);
+    try {
+      const res = await http(discordWebhookUrl, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      checks.push(
+        res.ok
+          ? { name: "Discord webhook", ok: true, detail: "reachable" }
+          : {
+              name: "Discord webhook",
+              ok: false,
+              detail: `HTTP ${res.status}`,
+              hint: "DISCORD_WEBHOOK_URL in .env is not a valid Discord webhook URL.",
+            },
+      );
+    } catch {
+      checks.push({
+        name: "Discord webhook",
+        ok: false,
+        hint: "Could not reach the Discord webhook. Check DISCORD_WEBHOOK_URL in .env.",
+      });
+    }
+  }
+
   // 8. Docker + runner image.
   const dockerCheck = await checkDocker(commandRunner);
   checks.push({ name: "Docker", ok: dockerCheck.ok, detail: dockerCheck.detail, hint: dockerCheck.hint });

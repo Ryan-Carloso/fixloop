@@ -149,7 +149,8 @@ Environment variables:
 - `FIXLOOP_CONFIG`: Path to the config file (default `fixloop.config.yaml`).
 - `DISCORD_WEBHOOK_URL`: Discord webhook URL for repair notifications
   (repair started, fix PR created, repair failed). Optional — when unset,
-  notifications are silently disabled.
+  notifications are silently disabled. Collected by `fixloop setup`
+  (stored in the install `.env` file, never in the YAML config).
 
 ## API Endpoints
 

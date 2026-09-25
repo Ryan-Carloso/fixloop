@@ -18,6 +18,10 @@ export type DiscordEvent =
   | { kind: "repair_failed"; job: DiscordJobRef; reason: string }
   | { kind: "needs_review"; job: DiscordJobRef; note?: string };
 
+// Tracks whether the "notifications disabled" startup warning was logged,
+// so repeated fromEnv() calls (tests, rebuilds) do not spam it.
+let disabledWarningLogged = false;
+
 /** Anything that can receive job-lifecycle notifications. */
 export interface JobNotifier {
   notify(event: DiscordEvent): Promise<void>;
@@ -91,7 +95,8 @@ function buildEmbed(event: DiscordEvent): Record<string, unknown> {
 /**
  * Posts job-lifecycle notifications to a Discord webhook.
  *
- * The webhook URL comes from the DISCORD_WEBHOOK_URL environment variable.
+ * The webhook URL comes from the DISCORD_WEBHOOK_URL environment variable
+ * (collected by `fixloop setup` and stored in the install .env file).
  * When it is unset the notifier is a silent no-op (a single warning is
  * logged at startup). notify() never throws: a failing webhook must never
  * break the repair pipeline.
@@ -101,7 +106,8 @@ export class DiscordNotifier implements JobNotifier {
 
   static fromEnv(env: NodeJS.ProcessEnv = process.env): DiscordNotifier {
     const url = env.DISCORD_WEBHOOK_URL?.trim() || undefined;
-    if (!url) {
+    if (!url && !disabledWarningLogged) {
+      disabledWarningLogged = true;
       console.warn(
         "DISCORD_WEBHOOK_URL is not set; Discord notifications are disabled.",
       );

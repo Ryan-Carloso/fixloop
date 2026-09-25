@@ -85,6 +85,27 @@ describe("DiscordNotifier.fromEnv", () => {
     const notifier = DiscordNotifier.fromEnv({ DISCORD_WEBHOOK_URL: "  " });
     expect(notifier.enabled).toBe(false);
   });
+
+  it("logs the disabled warning only once", async () => {
+    vi.resetModules();
+    const { DiscordNotifier: FreshNotifier } = await import(
+      "../src/notify/discord.js"
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      FreshNotifier.fromEnv({});
+      FreshNotifier.fromEnv({});
+      FreshNotifier.fromEnv({
+        DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/EXAMPLE",
+      });
+      const disabledWarnings = warn.mock.calls.filter(([msg]) =>
+        String(msg).includes("DISCORD_WEBHOOK_URL"),
+      );
+      expect(disabledWarnings).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("DiscordNotifier.notify", () => {
