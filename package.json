@@ -7,7 +7,7 @@
   "description": "Turn application errors into tested, verified pull requests.",
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json && mkdir -p dist/db && cp src/db/schema.sql dist/db/schema.sql",
+    "build": "tsc -p tsconfig.json && node scripts/copy-schema.mjs",
     "dev": "node --watch dist/server.js",
     "fake-bug": "node scripts/fake-bug.mjs",
     "fixloop": "node dist/cli/index.js",

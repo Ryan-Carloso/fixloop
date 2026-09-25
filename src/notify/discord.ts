@@ -18,10 +18,6 @@ export type DiscordEvent =
   | { kind: "repair_failed"; job: DiscordJobRef; reason: string }
   | { kind: "needs_review"; job: DiscordJobRef; note?: string };
 
-// Tracks whether the "notifications disabled" startup warning was logged,
-// so repeated fromEnv() calls (tests, rebuilds) do not spam it.
-let disabledWarningLogged = false;
-
 /** Anything that can receive job-lifecycle notifications. */
 export interface JobNotifier {
   notify(event: DiscordEvent): Promise<void>;
@@ -113,21 +109,24 @@ function buildEmbed(event: DiscordEvent): Record<string, unknown> {
  *
  * The webhook URL comes from the DISCORD_WEBHOOK_URL environment variable
  * (collected by `fixloop setup` and stored in the install .env file).
- * When it is unset the notifier is a silent no-op (a single warning is
- * logged at startup). notify() never throws: a failing webhook must never
+ * When it is unset the notifier is a silent no-op (a warning is logged once
+ * per disabled instance; production builds one at startup). notify() never throws: a failing webhook must never
  * break the repair pipeline.
  */
 export class DiscordNotifier implements JobNotifier {
-  private constructor(private readonly webhookUrl?: string) {}
-
-  static fromEnv(env: NodeJS.ProcessEnv = process.env): DiscordNotifier {
-    const url = env.DISCORD_WEBHOOK_URL?.trim() || undefined;
-    if (!url && !disabledWarningLogged) {
-      disabledWarningLogged = true;
+  private constructor(private readonly webhookUrl?: string) {
+    if (!webhookUrl) {
+      // One warning per disabled instance (production builds a single
+      // notifier at startup). Per-instance state keeps tests isolated —
+      // no module-global flag to reset between cases.
       console.warn(
         "DISCORD_WEBHOOK_URL is not set; Discord notifications are disabled.",
       );
     }
+  }
+
+  static fromEnv(env: NodeJS.ProcessEnv = process.env): DiscordNotifier {
+    const url = env.DISCORD_WEBHOOK_URL?.trim() || undefined;
     return new DiscordNotifier(url);
   }
 

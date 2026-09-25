@@ -3,11 +3,23 @@ import pg from "pg";
 import { JobStore, type Job, type JobStatus } from "../jobs/jobs.js";
 import type { ErrorContext } from "../providers/error-provider.js";
 
-/** Raw contents of src/db/schema.sql (copied next to dist/db/schema.sql by the build). */
-export const SCHEMA_SQL = readFileSync(
-  new URL("./schema.sql", import.meta.url),
-  "utf8",
-);
+/**
+ * Loads src/db/schema.sql (copied next to dist/db/schema.sql by the
+ * build). Read lazily at connect() time so zero-config deployments never
+ * pay import-time I/O — and a missing file fails at connect with a clear
+ * error instead of crashing the module load.
+ */
+export function loadSchemaSql(): string {
+  try {
+    return readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
+  } catch (err) {
+    throw new Error(
+      "FixLoop could not load the Postgres schema file (dist/db/schema.sql): " +
+        `${err instanceof Error ? err.message : String(err)}. ` +
+        "Was the package built correctly?",
+    );
+  }
+}
 
 /**
  * Minimal query surface the store needs. pg.Pool satisfies it, and tests
@@ -109,6 +121,15 @@ function jobParams(job: Job): unknown[] {
  * pipeline — the in-memory behavior is always preserved.
  */
 export class PostgresJobStore extends JobStore {
+  /**
+   * Per-job write-behind chains. persist() is fire-and-forget, but rapid
+   * transitions on the same job (RUNNING -> FAILED) must commit in
+   * dispatch order: pg.Pool runs concurrent queries on separate
+   * connections with no cross-connection commit ordering, so a stale
+   * write committing last would resurrect old status after a restart.
+   */
+  private readonly persistChains = new Map<string, Promise<void>>();
+
   private constructor(private readonly db: DbClient) {
     super();
   }
@@ -126,12 +147,15 @@ export class PostgresJobStore extends JobStore {
     try {
       await client.query("SELECT 1");
     } catch (err) {
+      // Best-effort cleanup: a failed probe with a real pg.Pool leaves
+      // sockets and retry timers behind otherwise.
+      await client.end?.().catch(() => {});
       throw new Error(
         `FixLoop could not reach Postgres (DATABASE_URL): ${dbErrorMessage(err)}. ` +
           "Is Postgres running and is DATABASE_URL correct?",
       );
     }
-    await client.query(SCHEMA_SQL);
+    await client.query(loadSchemaSql());
     const store = new PostgresJobStore(client);
     await store.hydrate();
     return store;
@@ -147,7 +171,7 @@ export class PostgresJobStore extends JobStore {
 
   override create(job: Job): Job {
     const created = super.create(job);
-    void this.persist(job);
+    this.writeBehind(job);
     return created;
   }
 
@@ -157,16 +181,39 @@ export class PostgresJobStore extends JobStore {
     patch?: Partial<Job>,
   ): Job | undefined {
     const updated = super.updateStatus(id, status, patch);
-    if (updated) void this.persist(updated);
+    if (updated) this.writeBehind(updated);
     return updated;
   }
 
-  private async persist(job: Job): Promise<void> {
+  /**
+   * Fire-and-forget persist, serialized per job id in dispatch order.
+   * Each write awaits the previous one for the same job before issuing
+   * its query, so commits land in the order the transitions happened.
+   */
+  private writeBehind(job: Job): void {
+    // Snapshot the params now: the queue mutates the job object in place,
+    // and the chained write runs later, so capturing by reference would
+    // persist a newer transition's state in this transition's slot.
+    const params = jobParams(job);
+    const id = job.id;
+    const tail = this.persistChains.get(id) ?? Promise.resolve();
+    const next = tail.then(() => this.persist(id, params));
+    this.persistChains.set(id, next);
+    // persist() never rejects (failures are logged), but defend the chain
+    // anyway; drop the finished tail so the map cannot grow without bound.
+    void next.catch(() => {}).then(() => {
+      if (this.persistChains.get(id) === next) {
+        this.persistChains.delete(id);
+      }
+    });
+  }
+
+  private async persist(id: string, params: unknown[]): Promise<void> {
     try {
-      await this.db.query(UPSERT_JOB, jobParams(job));
+      await this.db.query(UPSERT_JOB, params);
     } catch (err) {
       console.warn(
-        `Postgres job store: failed to persist job ${job.id}; continuing in-memory.`,
+        `Postgres job store: failed to persist job ${id}; continuing in-memory.`,
         err,
       );
     }

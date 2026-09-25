@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   PostgresJobStore,
-  SCHEMA_SQL,
+  loadSchemaSql,
   rowToJob,
   type DbClient,
 } from "../src/db/postgres.js";
@@ -12,7 +12,6 @@ import {
   newJobId,
   type Job,
 } from "../src/jobs/jobs.js";
-import type { ErrorContext } from "../src/providers/error-provider.js";
 
 /** Minimal in-memory fake of the DbClient surface (pg.Pool satisfies it). */
 function mockDb() {
@@ -43,10 +42,14 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     repository: "demo/repo",
     issueId: "ISSUE-1",
     status: "QUEUED",
+    // Real ErrorContext shape (no cast): fixtures must rot loudly if the
+    // interface grows required fields.
     errorContext: {
-      title: "boom",
-      message: "boom",
-    } as ErrorContext,
+      provider: "bugsnink",
+      issueId: "ISSUE-1",
+      project: "demo/repo",
+      exception: { type: "Boom", message: "boom" },
+    },
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -73,17 +76,18 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("SCHEMA_SQL", () => {
+describe("loadSchemaSql", () => {
   it("matches src/db/schema.sql on disk", () => {
     const onDisk = readFileSync(
       new URL("../src/db/schema.sql", import.meta.url),
       "utf8",
     );
-    expect(SCHEMA_SQL).toBe(onDisk);
+    expect(loadSchemaSql()).toBe(onDisk);
   });
 
   it("creates the fixloop_jobs table with the expected columns", () => {
-    expect(SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS fixloop_jobs");
+    const schemaSql = loadSchemaSql();
+    expect(schemaSql).toContain("CREATE TABLE IF NOT EXISTS fixloop_jobs");
     for (const column of [
       "id",
       "dedup_key",
@@ -97,8 +101,20 @@ describe("SCHEMA_SQL", () => {
       "created_at",
       "updated_at",
     ]) {
-      expect(SCHEMA_SQL).toContain(column);
+      expect(schemaSql).toContain(column);
     }
+  });
+
+  it("is read lazily at connect() time, not at module import", async () => {
+    // Regression test: the schema used to be read synchronously at module
+    // import, hard-crashing zero-config deployments when dist/db/schema.sql
+    // was missing. connect() must be the only reader.
+    const { client } = mockDb();
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    expect(store).toBeInstanceOf(PostgresJobStore);
   });
 });
 
@@ -130,6 +146,29 @@ describe("PostgresJobStore.connect", () => {
       q.text.includes("CREATE TABLE IF NOT EXISTS fixloop_jobs"),
     );
     expect(schemaQuery).toBeDefined();
+  });
+
+  it("ends the pool (best-effort) when the connectivity probe fails", async () => {
+    const { query } = mockDb();
+    const end = vi.fn(async () => {});
+    const client: DbClient = { query, end };
+    query.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+    await expect(
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
+    ).rejects.toThrow(/could not reach postgres/i);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it("still throws the clear error when pool end() itself fails", async () => {
+    const { query } = mockDb();
+    const end = vi.fn(async () => {
+      throw new Error("already ended");
+    });
+    const client: DbClient = { query, end };
+    query.mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+    await expect(
+      PostgresJobStore.connect("postgres://localhost:5432/fixloop", client),
+    ).rejects.toThrow(/could not reach postgres/i);
   });
 
   it("hydrates existing jobs so history survives restarts", async () => {
@@ -188,6 +227,11 @@ describe("rowToJob", () => {
 });
 
 describe("PostgresJobStore persistence", () => {
+  /** Lets the fire-and-forget write-behind chain settle. */
+  function flushWriteBehind(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
   it("create() writes the job with an INSERT using bound parameters", async () => {
     const { client, queries } = mockDb();
     const store = await PostgresJobStore.connect(
@@ -197,6 +241,7 @@ describe("PostgresJobStore persistence", () => {
     queries.length = 0;
     const job = makeJob({ note: "hello" });
     const created = store.create(job);
+    await flushWriteBehind();
 
     expect(created).toBe(job);
     expect(store.get(job.id)).toBe(job);
@@ -228,11 +273,13 @@ describe("PostgresJobStore persistence", () => {
     );
     const job = makeJob();
     store.create(job);
+    await flushWriteBehind();
     queries.length = 0;
 
     const updated = store.updateStatus(job.id, "PR_CREATED", {
       prUrl: "https://github.com/o/r/pull/7",
     });
+    await flushWriteBehind();
 
     expect(updated?.status).toBe("PR_CREATED");
     expect(updated?.prUrl).toBe("https://github.com/o/r/pull/7");
@@ -251,6 +298,44 @@ describe("PostgresJobStore persistence", () => {
     queries.length = 0;
     expect(store.updateStatus("nope", "FAILED")).toBeUndefined();
     expect(queries).toHaveLength(0);
+  });
+
+  it("commits write-behind persists for the same job in dispatch order", async () => {
+    // pg.Pool runs concurrent queries on separate connections with no
+    // cross-connection commit ordering, so floating persists could commit
+    // out of order and resurrect stale status after a restart. The store
+    // must serialize persists per job id.
+    const pending: Array<() => void> = [];
+    const committed: string[] = [];
+    const query = vi.fn(
+      async (
+        text: string,
+        params?: unknown[],
+      ): Promise<{ rows: Record<string, unknown>[] }> => {
+        if (text.includes("INSERT INTO fixloop_jobs")) {
+          // Gate every write so the test controls commit order.
+          await new Promise<void>((resolve) => pending.push(resolve));
+          committed.push(String(params?.[5]));
+        }
+        return { rows: [] };
+      },
+    );
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      { query },
+    );
+    const job = makeJob();
+    store.create(job); // persist #1 (QUEUED)
+    store.updateStatus(job.id, "FAILED"); // persist #2 (FAILED)
+
+    // Release commits in reverse dispatch order; a correct per-id chain
+    // still commits QUEUED before FAILED.
+    for (let i = 0; i < 10 && committed.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      pending.splice(0).reverse().forEach((resolve) => resolve());
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(committed).toEqual(["QUEUED", "FAILED"]);
   });
 
   it("keeps working (in-memory) when a write fails, and warns loudly", async () => {

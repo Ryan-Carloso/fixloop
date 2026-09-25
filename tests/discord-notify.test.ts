@@ -86,22 +86,21 @@ describe("DiscordNotifier.fromEnv", () => {
     expect(notifier.enabled).toBe(false);
   });
 
-  it("logs the disabled warning only once", async () => {
-    vi.resetModules();
-    const { DiscordNotifier: FreshNotifier } = await import(
-      "../src/notify/discord.js"
-    );
+  it("logs the disabled warning once per disabled instance", () => {
+    // No module-reset dance: the warning is per-instance state, so every
+    // fresh import behaves identically (production builds one notifier at
+    // startup and warns exactly once).
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      FreshNotifier.fromEnv({});
-      FreshNotifier.fromEnv({});
-      FreshNotifier.fromEnv({
+      DiscordNotifier.fromEnv({});
+      DiscordNotifier.fromEnv({});
+      DiscordNotifier.fromEnv({
         DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/EXAMPLE",
       });
       const disabledWarnings = warn.mock.calls.filter(([msg]) =>
         String(msg).includes("DISCORD_WEBHOOK_URL"),
       );
-      expect(disabledWarnings).toHaveLength(1);
+      expect(disabledWarnings).toHaveLength(2);
     } finally {
       warn.mockRestore();
     }
