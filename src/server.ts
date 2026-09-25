@@ -25,17 +25,22 @@ export const FIXLOOP_VERSION = "0.1.0";
  * server logs.
  */
 export function redactTokenFromUrl(url: string): string {
-  // Fastify decodes percent-encoded parameter names, so ?%74oken=<secret>
-  // authenticates as token= while the raw logged URL hides from a literal
-  // match. Decode first so encoded keys redact too; a malformed URL keeps
-  // its raw form rather than throwing inside a log hook.
-  let normalized: string;
+  // Two passes, in order. The raw pass consumes a token value containing
+  // percent-encoded separators (?token=a%26b): decoding first would split
+  // it and leak the tail into the logs. The decoded pass then catches
+  // percent-encoded parameter names (?%74oken=), which Fastify's query
+  // parser decodes and would otherwise authenticate as token= while
+  // hiding from the raw match. A malformed URL keeps the raw-pass result
+  // rather than throwing inside a log hook.
+  const redact = (value: string): string =>
+    value.replace(/([?&])token=[^&]*/g, "$1token=[redacted]");
+  let redacted = redact(url);
   try {
-    normalized = decodeURIComponent(url);
+    redacted = redact(decodeURIComponent(redacted));
   } catch {
-    normalized = url;
+    // Malformed percent sequences: the raw pass already did its best.
   }
-  return normalized.replace(/([?&])token=[^&]*/g, "$1token=[redacted]");
+  return redacted;
 }
 
 export interface ServerDeps {

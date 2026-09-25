@@ -103,22 +103,25 @@ function buildEmbed(event: DiscordEvent): Record<string, unknown> {
       break;
     case "pr_created":
       title = "✅ FixLoop: fix PR created";
+      // Rendered as plain text, not a link: escaping markdown is safe and
+      // neutralizes masked-link injection from the stored URL.
       rawDescription = event.prUrl
-        ? `Fix verified and PR opened: ${event.prUrl}`
+        ? `Fix verified and PR opened: ${escapeDiscordMarkdown(event.prUrl)}`
         : "Fix verified and PR opened (URL not recorded).";
       color = COLORS.prCreated;
       break;
     case "repair_failed":
       // The reason may echo error output; redact secret-looking values
-      // before it leaves the machine (same policy as public PR bodies).
+      // before it leaves the machine (same policy as public PR bodies),
+      // then escape markdown: reasons can echo provider payload content.
       title = "❌ FixLoop: repair failed";
-      rawDescription = `**Reason:** ${sanitizeForPr(event.reason)}`;
+      rawDescription = `**Reason:** ${escapeDiscordMarkdown(sanitizeForPr(event.reason))}`;
       color = COLORS.failed;
       break;
     case "needs_review":
       title = "👀 FixLoop: repair needs human review";
       rawDescription = event.note
-        ? `**Note:** ${sanitizeForPr(event.note)}`
+        ? `**Note:** ${escapeDiscordMarkdown(sanitizeForPr(event.note))}`
         : "The repair pipeline did not produce a verified fix.";
       color = COLORS.needsReview;
       break;

@@ -178,7 +178,7 @@ pre-shared webhook token: send it as the `X-FixLoop-Webhook-Token` header
 deliberately not accepted as `?token=` on these routes — the server logs
 the full request URL. When `FIXLOOP_WEBHOOK_SECRET` is unset the endpoints
 (and the webhook ingest) fail closed with
-`500 {"error":"webhook secret not configured"}`.
+`500 {"error":"server misconfigured"}`.
 
 ## MVP Limitations
 

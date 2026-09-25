@@ -332,3 +332,13 @@ describe("redactTokenFromUrl percent-encoded keys", () => {
     expect(redactTokenFromUrl("/jobs?status=%zz")).toBe("/jobs?status=%zz");
   });
 });
+
+describe("redactTokenFromUrl two-pass redaction", () => {
+  it("redacts a token value containing an encoded separator without leaking the tail", () => {
+    // Decoding first would split ?token=a%26b into ?token=a&b and leave
+    // the tail "b" in the logs. The raw pass must consume the whole value.
+    expect(redactTokenFromUrl("/webhooks/bugsink?token=a%26b")).toBe(
+      "/webhooks/bugsink?token=[redacted]",
+    );
+  });
+});

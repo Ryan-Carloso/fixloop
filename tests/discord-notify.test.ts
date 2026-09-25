@@ -198,7 +198,10 @@ describe("DiscordNotifier.notify", () => {
       reason: "deploy failed with token=ghp_abcdefghij1234567890",
     });
     const text = JSON.stringify(lastPayload());
-    expect(text).toContain("[REDACTED]");
+    // The [REDACTED] marker survives, markdown-escaped (brackets are
+    // escaped so no raw masked link can form in the embed). The assertion
+    // runs on the JSON-encoded payload, where each backslash is doubled.
+    expect(text).toContain("\\\\[REDACTED\\\\]");
     expect(text).not.toContain("ghp_abcdefghij1234567890");
   });
 
@@ -213,7 +216,10 @@ describe("DiscordNotifier.notify", () => {
     });
     const text = JSON.stringify(lastPayload());
     expect(text).not.toContain("supersecrettoken");
-    expect(text).toContain("/webhooks/[redacted]");
+    // The webhook path is redacted; the marker's brackets are
+    // markdown-escaped like everything else in the embed (doubled here
+    // because the assertion runs on the JSON-encoded payload).
+    expect(text).toContain("/webhooks/\\\\[redacted\\\\]");
   });
 
   it("never throws when the webhook POST rejects", async () => {
@@ -529,5 +535,45 @@ describe("JobQueue Discord wiring", () => {
     if (failEvent.kind === "repair_failed") {
       expect(failEvent.reason).toContain("exceeded 30m budget");
     }
+  });
+});
+
+describe("DiscordNotifier markdown escaping in reasons, notes, and URLs", () => {
+  function enabledNotifier(): DiscordNotifier {
+    return DiscordNotifier.fromEnv({ DISCORD_WEBHOOK_URL: WEBHOOK_URL });
+  }
+
+  it("escapes markdown in failure reasons", async () => {
+    await enabledNotifier().notify({
+      kind: "repair_failed",
+      job: jobRef(),
+      reason: "handler crashed: [see logs](https://evil.example/phish)",
+    });
+    const embed = lastPayload().embeds[0];
+    // No raw masked link may survive in a trusted FixLoop notification.
+    expect(embed.description).not.toContain("[see logs](");
+    expect(embed.description).toContain(
+      "\\[see logs\\]\\(https://evil.example/phish\\)",
+    );
+  });
+
+  it("escapes markdown in review notes", async () => {
+    await enabledNotifier().notify({
+      kind: "needs_review",
+      job: jobRef(),
+      note: "suspicious: [details](https://evil.example/phish)",
+    });
+    const embed = lastPayload().embeds[0];
+    expect(embed.description).not.toContain("[details](");
+  });
+
+  it("escapes markdown in PR URLs rendered as plain text", async () => {
+    await enabledNotifier().notify({
+      kind: "pr_created",
+      job: jobRef(),
+      prUrl: "https://github.com/o/r/pull/1)[click](https://evil.example",
+    });
+    const embed = lastPayload().embeds[0];
+    expect(embed.description).not.toContain(")[click](");
   });
 });
