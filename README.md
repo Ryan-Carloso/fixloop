@@ -165,6 +165,14 @@ Environment variables:
   e.g. `?status=FAILED`).
 - `GET /jobs/:id`: Get job status.
 
+The `/jobs` endpoints serve raw error diagnostics, so they require the
+pre-shared webhook token: send it as the `X-FixLoop-Webhook-Token` header
+(`401 {"error":"invalid webhook token"}` without it). The token is
+deliberately not accepted as `?token=` on these routes — the server logs
+the full request URL. When `FIXLOOP_WEBHOOK_SECRET` is unset the endpoints
+(and the webhook ingest) fail closed with
+`500 {"error":"webhook secret not configured"}`.
+
 ## MVP Limitations
 
 - **Docker**: Requires a working Docker daemon. Tested with mocks; live Docker blocked in sandboxed CI.

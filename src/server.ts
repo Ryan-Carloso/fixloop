@@ -41,16 +41,20 @@ function tokensEqual(a: string, b: string): boolean {
 type AuthCheck = { ok: true } | { ok: false; status: 401 | 500; error: string };
 
 /**
- * Pre-shared-token auth for every endpoint that touches job data. BugSink
- * does not sign its outbound webhooks, so the token travels as the
- * X-FixLoop-Webhook-Token header or as ?token=. The /jobs endpoints serve
- * raw error diagnostics (errorContext straight from the provider payload),
- * so they require the same token as the webhook ingest — never serve them
- * open on a 0.0.0.0-bound server.
+ * Pre-shared-token auth for every endpoint that touches job data. The
+ * /jobs endpoints serve raw error diagnostics (errorContext straight from
+ * the provider payload), so they require the same token as the webhook
+ * ingest — never serve them open on a 0.0.0.0-bound server.
+ *
+ * The token travels as the X-FixLoop-Webhook-Token header. The webhook
+ * ingest route additionally accepts ?token= (some webhook senders cannot
+ * set headers); the GET routes do not, because Fastify's request logs
+ * include the full URL and would write the secret into the server logs.
  */
 function checkAuth(
   req: { headers: Record<string, unknown>; query: unknown },
   deps: ServerDeps,
+  opts: { allowQueryToken?: boolean } = {},
 ): AuthCheck {
   const secret = deps.webhookSecret ?? process.env.FIXLOOP_WEBHOOK_SECRET ?? "";
   if (!secret) {
@@ -60,7 +64,11 @@ function checkAuth(
   const queryToken = (req.query as { token?: unknown }).token;
   const provided =
     (Array.isArray(headerToken) ? headerToken[0] : headerToken) ??
-    (typeof queryToken === "string" ? queryToken : undefined);
+    (opts.allowQueryToken === false
+      ? undefined
+      : typeof queryToken === "string"
+        ? queryToken
+        : undefined);
   if (typeof provided !== "string" || !tokensEqual(provided, secret)) {
     return { ok: false, status: 401, error: "invalid webhook token" };
   }
@@ -94,7 +102,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   app.get("/health", async () => ({ ok: true, version: FIXLOOP_VERSION }));
 
   app.get("/jobs", async (req, reply) => {
-    const auth = checkAuth(req, deps);
+    const auth = checkAuth(req, deps, { allowQueryToken: false });
     if (!auth.ok) {
       return reply.status(auth.status).send({ error: auth.error });
     }
@@ -108,7 +116,7 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   });
 
   app.get("/jobs/:id", async (req, reply) => {
-    const auth = checkAuth(req, deps);
+    const auth = checkAuth(req, deps, { allowQueryToken: false });
     if (!auth.ok) {
       return reply.status(auth.status).send({ error: auth.error });
     }

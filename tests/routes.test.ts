@@ -135,6 +135,36 @@ describe("webhook -> queue integration", () => {
     expect(noToken.statusCode).toBe(401);
   });
 
+  it("rejects ?token= on the GET routes (the secret would land in request logs)", async () => {
+    const { app } = buildTestServer();
+    const res = await app.inject({
+      method: "GET",
+      url: `/jobs?token=${secret}`,
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "invalid webhook token" });
+  });
+
+  it("returns 500 on the GET routes when no webhook secret is configured", async () => {
+    const previous = process.env.FIXLOOP_WEBHOOK_SECRET;
+    delete process.env.FIXLOOP_WEBHOOK_SECRET;
+    try {
+      const app = buildServer({ config });
+      const list = await app.inject({ method: "GET", url: "/jobs" });
+      expect(list.statusCode).toBe(500);
+      expect(list.json()).toEqual({ error: "webhook secret not configured" });
+      const one = await app.inject({ method: "GET", url: "/jobs/abc" });
+      expect(one.statusCode).toBe(500);
+      expect(one.json()).toEqual({ error: "webhook secret not configured" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.FIXLOOP_WEBHOOK_SECRET;
+      } else {
+        process.env.FIXLOOP_WEBHOOK_SECRET = previous;
+      }
+    }
+  });
+
   it("returns 404 for an unknown job id", async () => {
     const { app } = buildTestServer();
     const res = await app.inject({

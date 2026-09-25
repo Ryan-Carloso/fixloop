@@ -610,6 +610,27 @@ describe("PostgresJobStore persistence", () => {
     }
   });
 
+  it("preserves unknown error_context keys on hydration", async () => {
+    // Future providers may add fields beyond the schema; they must survive
+    // a restart instead of being silently stripped by validation.
+    const { client, rowsQueue } = mockDb();
+    const job = makeJob({ status: "FAILED" });
+    rowsQueue.push([
+      {
+        ...jobRow(job),
+        error_context: { ...job.errorContext, futureField: "kept" },
+      },
+    ]);
+    const store = await PostgresJobStore.connect(
+      "postgres://localhost:5432/fixloop",
+      client,
+    );
+    expect(
+      (store.get(job.id)?.errorContext as Record<string, unknown>)
+        .futureField,
+    ).toBe("kept");
+  });
+
   it("lists newest-first from hydrated rows", async () => {
     const { client, rowsQueue } = mockDb();
     const older = makeJob({
