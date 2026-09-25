@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveStore } from "../src/server.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { main, resolveStore } from "../src/server.js";
 import type { PostgresJobStore } from "../src/db/postgres.js";
 import type { JobNotifier } from "../src/notify/discord.js";
 
@@ -63,6 +66,82 @@ describe("resolveStore", () => {
       expect(exit).toHaveBeenCalledWith(1);
     } finally {
       error.mockRestore();
+    }
+  });
+});
+
+describe("main()", () => {
+  it("threads deps.handleJob into the queue on the in-memory path", async () => {
+    // Regression test: main() used to drop deps.handleJob when
+    // DATABASE_URL was unset, silently running stubHandler instead of the
+    // supplied handler.
+    const dir = mkdtempSync(join(tmpdir(), "fixloop-main-"));
+    writeFileSync(
+      join(dir, "fixloop.config.yaml"),
+      [
+        "repositories:",
+        "  my-app:",
+        "    providerProject: my-app",
+        '    github: { repository: "my-user/my-app", defaultBranch: "main" }',
+        "    commands:",
+        '      install: "true"',
+        '      test: "true"',
+        "",
+      ].join("\n"),
+    );
+    const prevEnv = {
+      FIXLOOP_CONFIG: process.env.FIXLOOP_CONFIG,
+      FIXLOOP_PORT: process.env.FIXLOOP_PORT,
+      DATABASE_URL: process.env.DATABASE_URL,
+      FIXLOOP_WEBHOOK_SECRET: process.env.FIXLOOP_WEBHOOK_SECRET,
+    };
+    process.env.FIXLOOP_CONFIG = join(dir, "fixloop.config.yaml");
+    process.env.FIXLOOP_PORT = "0";
+    delete process.env.DATABASE_URL;
+    process.env.FIXLOOP_WEBHOOK_SECRET = "test-secret";
+    try {
+      const app = await main({
+        handleJob: async (_job, update) => {
+          update("PR_CREATED", { prUrl: "https://example.com/custom-handler" });
+        },
+      });
+      try {
+        const address = app.server.address();
+        const port =
+          typeof address === "object" && address !== null ? address.port : 0;
+        expect(port).toBeGreaterThan(0);
+        const res = await fetch(`http://127.0.0.1:${port}/webhooks/bugsink`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-fixloop-webhook-token": "test-secret",
+          },
+          body: JSON.stringify({
+            id: "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+            calculated_type: "ValueError",
+            calculated_value: "invalid literal for int()",
+            title: "ValueError: invalid literal for int()",
+            project_name: "my-app",
+            url: "https://bugsink.example.com/issues/497f6eca-6276-4993-bfeb-53cbbbba6f08/",
+            alert_reason: "NEW_ISSUE",
+          }),
+        });
+        expect(res.status).toBe(202);
+        await vi.waitFor(async () => {
+          const jobsRes = await fetch(`http://127.0.0.1:${port}/jobs`, {
+            headers: { "x-fixloop-webhook-token": "test-secret" },
+          });
+          const jobs = (await jobsRes.json()) as Array<{ prUrl?: string }>;
+          expect(jobs[0]?.prUrl).toBe("https://example.com/custom-handler");
+        });
+      } finally {
+        await app.close();
+      }
+    } finally {
+      for (const [key, value] of Object.entries(prevEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 });

@@ -75,7 +75,7 @@ function tokensEqual(a: string, b: string): boolean {
   return timingSafeEqual(aBuf, bBuf);
 }
 
-type AuthCheck = { ok: true } | { ok: false; status: 401 | 500; error: string };
+type AuthCheck = { ok: true } | { ok: false; status: 401; error: string };
 
 /**
  * Pre-shared-token auth for every endpoint that touches job data. The
@@ -191,9 +191,6 @@ export function buildServer(deps: ServerDeps = {}): FastifyInstance {
   app.post("/webhooks/bugsink", async (req, reply) => {
     const auth = checkAuth(req, deps, { allowQueryToken: true });
     if (!auth.ok) {
-      if (auth.status === 500) {
-        req.log.error("webhook secret not configured; refusing to accept events");
-      }
       return reply.status(auth.status).send({ error: auth.error });
     }
 
@@ -368,7 +365,9 @@ export async function resolveStore(
   }
 }
 
-async function main(deps: { handleJob?: JobHandler } = {}): Promise<void> {
+export async function main(
+  deps: { handleJob?: JobHandler } = {},
+): Promise<FastifyInstance> {
   const port = Number(process.env.FIXLOOP_PORT ?? 3000);
   const host = process.env.FIXLOOP_HOST ?? "0.0.0.0";
 
@@ -414,9 +413,13 @@ async function main(deps: { handleJob?: JobHandler } = {}): Promise<void> {
   } else {
     // Reuse the notifier built above: buildServer() would otherwise
     // construct a second one, warning twice about the unset webhook URL.
-    app = buildServer({ config, notifier });
+    // Thread deps.handleJob like the Postgres branch: buildServer()
+    // honors it, and dropping it here would silently run stubHandler
+    // instead of the caller's handler on the in-memory path.
+    app = buildServer({ config, notifier, handleJob: deps.handleJob });
   }
   await app.listen({ port, host });
+  return app;
 }
 
 // Only listen when executed directly (not when imported by tests).
