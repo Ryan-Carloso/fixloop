@@ -108,4 +108,25 @@ describe("webhook -> queue integration", () => {
     const res = await app.inject({ method: "GET", url: "/jobs/does-not-exist" });
     expect(res.statusCode).toBe(404);
   });
+
+  it("filters jobs via GET /jobs?status=", async () => {
+    const { app } = buildTestServer();
+    await postWebhook(app, payload);
+    await postWebhook(app, { ...payload, id: "aaaaaaaa-0000-0000-0000-000000000000" });
+    const res = await app.inject({ method: "GET", url: "/jobs?status=QUEUED" });
+    expect(res.statusCode).toBe(200);
+    // The blocking test handler keeps the first job RUNNING; only the
+    // second stays QUEUED (concurrency 1).
+    expect(res.json()).toHaveLength(1);
+    expect(res.json()[0].issueId).toBe("aaaaaaaa-0000-0000-0000-000000000000");
+    const none = await app.inject({ method: "GET", url: "/jobs?status=FAILED" });
+    expect(none.statusCode).toBe(200);
+    expect(none.json()).toHaveLength(0);
+  });
+
+  it("returns 400 for an unknown ?status= value", async () => {
+    const { app } = buildTestServer();
+    const res = await app.inject({ method: "GET", url: "/jobs?status=BOGUS" });
+    expect(res.statusCode).toBe(400);
+  });
 });
