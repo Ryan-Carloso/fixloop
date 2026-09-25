@@ -119,12 +119,18 @@ describe("sanitizeForPr", () => {
       "github_pat_abcdefghij1234567890ABCDEFGH",
       "glpat-x1234567890abcdefghi",
       "npm_abc123def456ghi789jkl012mno345pqr",
+      "ghs_abc123def456ghi789jkl012mno345pqr",
+      "ghu_abc123def456ghi789jkl012mno345pqr",
+      "ghr_abc123def456ghi789jkl012mno345pqr",
       "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
     ].join(" ");
     const redacted = sanitizeForPr(input);
     expect(redacted).not.toContain("github_pat_");
     expect(redacted).not.toContain("glpat-");
     expect(redacted).not.toContain("npm_abc123");
+    expect(redacted).not.toContain("ghs_abc123");
+    expect(redacted).not.toContain("ghu_abc123");
+    expect(redacted).not.toContain("ghr_abc123");
     expect(redacted).not.toContain("eyJhbGci");
   });
 
