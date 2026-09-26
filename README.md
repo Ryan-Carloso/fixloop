@@ -52,37 +52,20 @@ src/
 
 ## Quick Start
 
-```bash
-# Install the CLI from npm (no repository clone needed)
-npm install -g fixloop-agent
+Install FixLoop and run the setup wizard in the directory where you want its
+configuration saved:
 
-# Run the interactive setup wizard in the installation directory
+```bash
+npm install -g fixloop-agent
 fixloop setup
 ```
 
-To run directly from a source checkout instead: `pnpm install && pnpm build && pnpm fixloop setup`.
-
-The wizard checks your server (OS, Docker, Git), configures your error
-provider, GitHub access, and OpenCode model, validates the Docker runner
-with a disposable container, and writes `fixloop.config.yaml` + `.env`
-(non-secret config and secrets are kept separate). Then:
+The wizard checks your server and guides you through configuration. When it
+finishes, it saves `fixloop.config.yaml` and `.env` in the current directory.
+Then check the setup with:
 
 ```bash
-fixloop doctor   # diagnose the installation (read-only, never changes anything)
-fixloop status   # concise status; secrets are never printed
-fixloop test     # safely exercise the installation (no fake bugs, no PRs)
-fixloop configure # update the existing configuration
-```
-
-```bash
-# Run tests
-pnpm test
-
-# Typecheck
-pnpm typecheck
-
-# Start server
-pnpm start
+fixloop doctor
 ```
 
 ## Provider support
@@ -114,10 +97,10 @@ no hardcoded model list to go stale.
 
 ## Configuration
 
-The recommended way to configure FixLoop is the wizard:
+Run the wizard again from the same directory to update your configuration:
 
 ```bash
-fixloop setup
+fixloop configure
 ```
 
 It writes two files in the install directory:
@@ -212,22 +195,6 @@ The test suite includes:
 - Scripted E2E (`node e2e/wizard-e2e.mjs`): full wizard run in a disposable
   directory, real server boot, `doctor`/`status`/`test` against it
   (evidence in `e2e/evidence.log`; Docker/GitHub/AI are test-doubled).
-
-## Publishing to npm
-
-Publishing requires an npm account with permission to publish `fixloop-agent`. From a source checkout:
-
-```bash
-pnpm install
-pnpm typecheck
-pnpm test
-npm pack --dry-run   # Confirm dist/cli/index.js and dist/db/schema.sql are included
-npm login
-npm publish
-```
-
-`prepack` builds the TypeScript output and copies the database schema before packing.
-For subsequent releases, bump the version in `package.json` before publishing.
 
 ## License
 
