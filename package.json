@@ -2,12 +2,17 @@
   "bin": {
     "fixloop": "dist/cli/index.js"
   },
-  "name": "fixloop",
+  "name": "fixloop-agent",
   "version": "0.1.0",
   "description": "Turn application errors into tested, verified pull requests.",
   "type": "module",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-schema.mjs",
+    "prepack": "npm run build",
     "dev": "node --watch dist/server.js",
     "fake-bug": "node scripts/fake-bug.mjs",
     "fixloop": "node dist/cli/index.js",
