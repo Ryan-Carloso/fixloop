@@ -60,16 +60,18 @@ pnpm install
 # Build (also wires up the `fixloop` CLI)
 pnpm build
 
-# Interactive setup wizard (recommended)
+# Interactive setup wizard (recommended; needs a real terminal)
 node dist/cli/index.js setup
+# or:
+pnpm fixloop setup
 # or, after `pnpm link` / global install:
 fixloop setup
 ```
 
-The wizard checks your server (OS, Docker, Git), configures your error
-provider, GitHub access, and OpenCode model, validates the Docker runner
-with a disposable container, and writes `fixloop.config.yaml` + `.env`
-(non-secret config and secrets are kept separate). Then:
+The wizard walks you through every question, validates each answer live
+(preflight, GitHub, Docker runner, AI provider), and only writes
+`fixloop.config.yaml` + `.env` after you confirm. See
+[Setup wizard](#setup-wizard) for the full walkthrough. Then:
 
 ```bash
 fixloop doctor   # diagnose the installation (read-only, never changes anything)
@@ -88,6 +90,129 @@ pnpm typecheck
 # Start server
 pnpm start
 ```
+
+## Setup wizard
+
+`fixloop setup` is interactive and needs a real terminal (a TTY). Nothing is
+written until you answer **Save configuration?** with yes — declining that
+question, or pressing Ctrl+C before it, exits without touching any files.
+
+```bash
+fixloop setup               # after `pnpm link` / global install
+pnpm fixloop setup          # from a checkout
+node dist/cli/index.js setup
+```
+
+### 1. Preflight
+
+The wizard stops (exit code 1, nothing written) until every check passes:
+
+| Check | Requirement |
+|---|---|
+| System | OS, arch, CPUs, RAM, free disk (informational) |
+| Node.js | v22 or newer |
+| Docker | installed **and** the daemon running |
+| Git | installed and on `PATH` |
+
+Failures print an actionable hint (install link, "start the Docker daemon", …);
+fix it and re-run the same command.
+
+### 2. Existing configuration
+
+If `fixloop.config.yaml` or `.env` already exists in the directory, the wizard
+never overwrites it silently and asks what to do:
+
+- **Update configuration** — re-runs the wizard; the current files are backed
+  up before being replaced.
+- **Run doctor** — hands off to `fixloop doctor` and exits.
+- **Cancel** — nothing changes.
+
+`fixloop configure` skips this menu and goes straight to update mode.
+
+### 3. The questions, in order
+
+| # | Prompt | What to answer |
+|---|---|---|
+| 1 | Error provider | BugSink is the only selectable option; the rest are listed as "Coming soon". |
+| 2 | Project name | Must match the `project_name` in your BugSink project — this is how incoming errors are mapped to a repository. |
+| 3 | Webhook token | Default: generate a random 64-char token. Choosing "no" asks for your own (minimum 16 characters). |
+| 4 | Public FixLoop URL | `https://` + hostname, **no path** (webhooks live at `/webhooks/<provider>`). Plain HTTP works but prints a warning. The wizard then prints your webhook URL, e.g. `https://fixloop.example.com/webhooks/bugsink`. |
+| 5 | GitHub authentication | Fine-grained PAT (GitHub App appears but is disabled). The wizard prints where to create it: https://github.com/settings/tokens with **Contents: read and write**. |
+| 6 | Repository | Choose from the repos the token can see, or "Enter manually..." → `owner/repo`. Verified read-only: authentication, repository access, contents readable, and push permission (needed to open fix PRs). On failure you get a retry loop for the token; backing out cancels with no writes. The default branch is read from the repo metadata. |
+| 7 | Install / test commands | The repo root listing is checked for lockfiles and a stack is suggested (pnpm → npm → yarn → bun → python). Accept it or type your own; install and test are required, lint and typecheck are optional. |
+| 8 | AI provider | Anthropic, OpenAI, OpenRouter, Z.AI, or OpenAI-compatible → API key (masked, ≥ 8 chars) → base URL (custom providers only) → model id (you type it, no spaces, e.g. `anthropic/claude-sonnet-4-5`). |
+| 9 | Runner image | Default `node:22`; validated live (next section). A failed validation offers to try another image. |
+| 10 | AI probe | Anthropic/OpenAI/OpenRouter only: a single tiny request inside the runner image to prove the key and model work. Costs a few tokens; you can continue on failure. Skipped for custom providers, which instead print a manual `docker run … opencode run …` command. |
+| 11 | Discord webhook URL | Optional, masked; press Enter to skip. |
+
+### 4. Runner image validation
+
+The wizard runs a disposable container (always cleaned up) and checks:
+
+| Check | Why |
+|---|---|
+| Container starts | the image pulls and runs |
+| Running as non-root | untrusted repair code should not run as root |
+| Git available | FixLoop clones the repo inside the container |
+| OpenCode available | the coding agent runs there |
+| Workspace writable | the agent has to write the fix |
+| Network available | the AI provider needs outbound HTTPS |
+| Container cleaned up | no leftovers on the host |
+
+The default `node:22` fails this on purpose (it runs as root and ships no
+OpenCode CLI) — treat it as a starting point and bring an image with a
+non-root `USER`, `git`, and the [OpenCode CLI](https://opencode.ai/docs)
+installed.
+
+### 5. What gets saved
+
+A secret-free summary is printed first, then **Save configuration?**:
+
+- `fixloop.config.yaml` — non-secret configuration; an existing file is
+  backed up as `fixloop.config.yaml.bak.<timestamp>`.
+- `.env` — secrets only (`FIXLOOP_WEBHOOK_SECRET`, `GITHUB_TOKEN`, the AI
+  provider key, optional `DISCORD_WEBHOOK_URL`), written with owner-only
+  permissions (`0600`); unrelated existing keys are preserved; an existing
+  file is backed up too.
+- `opencode.json` — written only for custom AI providers, and it references
+  the key as `{env:VAR}`, never the secret itself.
+
+Both files are written atomically (temp file + rename), so a crash leaves
+either the old or the new content — never a half-written config. Secrets are
+masked while you type them and scrubbed from everything printed afterwards.
+
+Finally, **Start FixLoop now?** boots the server in the background and polls
+`/health` for up to 20 seconds (port from `FIXLOOP_PORT`, default `3000`).
+
+### 6. After the wizard
+
+```bash
+fixloop doctor            # read-only diagnosis: config, secrets (names only),
+                          # GitHub access, webhook endpoint, Docker + runner
+                          # image, API health. Add --probe for a live AI probe.
+fixloop status            # one-screen status; secrets are masked
+fixloop test              # runs doctor, then sends a safe probe event to your
+                          # webhook URL (unknown project → nothing queued)
+fixloop configure         # re-run the wizard in update mode
+```
+
+`fixloop test` needs the server answering on the webhook URL (start it with
+`pnpm start`, or let the wizard start it at the end).
+
+Then paste the webhook URL into your BugSink project and send the webhook
+token as the `X-FixLoop-Webhook-Token` header (or `?token=` query parameter).
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `fixloop setup needs an interactive terminal.` | Run it in a real terminal — pipes and CI have no TTY. |
+| Preflight failure | Follow the printed hint (Node 22+, Docker daemon running, `git` on `PATH`), then re-run. |
+| `GitHub verification failed` | A fine-grained PAT needs **Contents: read and write** on that repository (classic PAT: `repo` scope). A 404 means the token cannot see the repo. |
+| Runner validation fails on "Running as non-root" or "OpenCode available" | Use an image with a non-root `USER`, `git`, and the OpenCode CLI. |
+| AI probe: 401 / unauthorized | The provider rejected the API key — check it, then re-run `fixloop doctor --probe`. |
+| `fixloop test` reports 401 | The webhook token does not match the server's; re-run `fixloop setup`. |
+| "Could not start FixLoop" at the end | The port is busy or the server crashed; check `FIXLOOP_PORT`, then run `fixloop doctor`. |
 
 ## Provider support
 
@@ -118,7 +243,8 @@ no hardcoded model list to go stale.
 
 ## Configuration
 
-The recommended way to configure FixLoop is the wizard:
+The recommended way to configure FixLoop is the
+[setup wizard](#setup-wizard):
 
 ```bash
 fixloop setup
@@ -128,9 +254,9 @@ It writes two files in the install directory:
 
 - `fixloop.config.yaml` — non-secret configuration (provider, public URL,
   repository, commands, AI provider/model, runner image). Safe to inspect.
-- `.env` — secrets only (`FIXLOOP_WEBHOOK_SECRET`, `GITHUB_TOKEN`, and the
-  AI provider API key). Written with owner-only permissions (`0600`).
-  Never commit this file.
+- `.env` — secrets only (`FIXLOOP_WEBHOOK_SECRET`, `GITHUB_TOKEN`, the
+  AI provider API key, and the optional `DISCORD_WEBHOOK_URL`). Written with
+  owner-only permissions (`0600`). Never commit this file.
 
 You can also start from the included `fixloop.config.example.yaml` — copy it
 to `fixloop.config.yaml` (or point `FIXLOOP_CONFIG` at it) and adjust the
